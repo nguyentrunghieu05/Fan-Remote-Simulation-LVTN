@@ -1,0 +1,10 @@
+using "platforms/cpus/stm32g0.repl"
+
+flash:
+    size: 0x80000
+
+ram:
+    size: 0x24000
+
+timer6:
+    -> nvic@17
