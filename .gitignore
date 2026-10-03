@@ -10,3 +10,7 @@ tools/simulator/build/
 .settings/
 Debug/
 Release/
+
+# STM32CubeIDE workspace
+.metadata/
+*.launch
