@@ -117,6 +117,28 @@ Trên Windows, nếu gcc không nằm trong PATH:
 Kết quả build hiện tại: 64 KB flash (12 %), 41 KB RAM (28 %, trong đó 32 KB
 là heap FreeRTOS), không có cảnh báo với `-Wall -Wextra`.
 
+### Mở bằng STM32CubeIDE
+
+Thư mục này đã là một project STM32CubeIDE (`.project`, `.cproject`), dùng
+chính `Makefile` ở trên để build, nên IDE và dòng lệnh luôn ra cùng một file.
+
+1. Giải nén vào `D:\Fan-LVTN\fan-controller-fw`.
+2. CubeIDE: **File > Import > General > Existing Projects into Workspace**,
+   chọn thư mục trên, bấm Finish (không tick "Copy projects into workspace").
+3. Bấm Build (búa). CubeIDE tự đưa trình biên dịch và `make` có sẵn của nó vào
+   PATH. Kết quả: `build/fan_controller.elf`.
+4. Debug: chạy cấu hình `fan_controller Debug` (ST-LINK, có hiển thị task
+   FreeRTOS). Nếu IDE báo lỗi cấu hình, chuột phải `build/fan_controller.elf`
+   > **Debug As > STM32 C/C++ Application** để IDE tự tạo lại.
+
+`tools/cubemx/fan_controller_cubemx.ioc` mô tả cùng sơ đồ chân, xung clock
+64 MHz và thông số ngoại vi như `config/board.h`, để mở bằng STM32CubeMX xem
+pinout, clock tree và đưa hình vào luận văn. Firmware không sinh code từ
+CubeMX (lớp BSP viết tay), nên **đừng bấm Generate Code vào thư mục
+firmware**. Nếu muốn thử, CubeMX sẽ tạo project riêng `fan_controller_cubemx`
+trong `tools/cubemx/`. Các file `.ioc` / `.cproject` này được viết tay, chưa
+mở thử trên CubeIDE / CubeMX thật; nếu IDE báo lỗi khi import, hãy gửi ảnh lỗi.
+
 ## 4. Sử dụng
 
 ### Dòng lệnh (PuTTY / Tera Term, 115200)
@@ -187,6 +209,19 @@ phỏng nhiệt vòng kín hội tụ về setpoint, log flash qua quấn vòng 
 động lại, mất điện giữa lúc ghi log và lúc lưu cấu hình, driver W25Q chạy
 với chip giả lập giải mã lệnh SPI, driver SHT3x với CRC sai và NACK.
 
+**App giả lập trên trình duyệt** (`tools/simulator/fan_sim.html`): mở trực
+tiếp bằng Chrome / Edge, không cần cài gì. Các file C thật của firmware
+(`app_fsm`, `fan_logic`, `pid`, `ramp`, `fault`, `modbus_slave`, `crc`,
+`telemetry`, `datalog`, `cli`, driver `w25qxx`, `sht3x`, `ssd1306`) được biên
+dịch sang JavaScript (`fan_sim_core.js`, bằng `build_sim.sh`: clang → WebAssembly
+→ wasm2js). `sim_board.c` thay phần cứng: mô hình nhiệt của máy và quạt, chip
+W25Q64 / SHT31 / SSD1306 giả lập ở mức byte trên bus SPI / I2C, và một vòng
+100 ms gọi các bước giống các task trên chip. Trong app có màn hình OLED vẽ từ
+GDDRAM, LED, relay, đồ thị đáp ứng PID, console CLI, Modbus master (gửi khung
+có CRC, giải mã trả lời và exception), LoRa gateway ($FAN / $ACK / $CMD), và
+các nút gây lỗi (kẹt quạt, rút cảm biến, mất sóng LoRa, tháo flash).
+Chạy nhanh trên PC không cần trình duyệt: xem dòng cuối `build_sim.sh`.
+
 **Chạy firmware thật trên giả lập Renode** (`tests/renode/`): nạp file
 `.elf` đã build vào mô hình STM32G0 của Renode 1.15.3, giao tiếp qua
 USART2. 3 kịch bản đạt: khởi động khi thiếu phần cứng phụ, chế độ AUTO mất
@@ -214,5 +249,7 @@ src/middleware/ thư viện thuần C
 src/services/  các task
 src/app/       main, máy trạng thái, luật điều khiển
 tests/         unit test (PC) + tests/renode (giả lập)
+tools/simulator/ app giả lập trên trình duyệt (fan_sim.html)
+tools/cubemx/  file .ioc để xem pinout / clock bằng STM32CubeMX
 third_party/   HAL STM32G0 (BSD-3), CMSIS (Apache-2.0), FreeRTOS (MIT)
 ```
