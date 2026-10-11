@@ -87,9 +87,12 @@
 #define SENSOR_SCL_PIN          GPIO_PIN_8
 #define SENSOR_SDA_PORT         GPIOB
 #define SENSOR_SDA_PIN          GPIO_PIN_9
-/* TIMINGR for 400 kHz with I2C kernel clock = PCLK = 64 MHz:
- * PRESC=7 (125 ns), SCLDEL=3, SDADEL=0, SCLH=5, SCLL=11 */
-#define SENSOR_I2C_TIMING       0x7030050BUL
+/* TIMINGR for 100 kHz (standard mode) with I2C kernel clock = PCLK = 64 MHz:
+ * PRESC=15 (250 ns), SCLDEL=4, SDADEL=2, SCLH=15 (4.0 us), SCLL=19 (5.0 us).
+ * Same tick values as the RM0444 100 kHz example for 16 MHz, PRESC scaled x4.
+ * 100 kHz instead of 400 kHz: PCF8574 LCD backpacks are rated 100 kHz, and the
+ * slower edges are more tolerant of breadboard wiring and weak pull-ups. */
+#define SENSOR_I2C_TIMING       0xF0420F13UL
 
 /* ---- Fan outputs / inputs ---- */
 #define FAN_PWM_TIM             TIM1
