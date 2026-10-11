@@ -12,6 +12,8 @@ void sys_data_init(const fan_config_t *cfg)
     memset(&s_data, 0, sizeof s_data);
     s_data.cfg     = *cfg;
     s_data.m.state = APP_STATE_OFF;
+    s_data.m.sensor_name  = "none";
+    s_data.m.display_name = "none";
     s_lock = xSemaphoreCreateMutex();
 }
 

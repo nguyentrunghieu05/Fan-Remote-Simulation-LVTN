@@ -1,5 +1,6 @@
 #include "sensors.h"
 #include "sht3x.h"
+#include "bme280.h"
 #include "sys_data.h"
 #include "supervisor.h"
 #include "bsp.h"
@@ -15,13 +16,85 @@
 #define SHT_RETRY_MS       10000U
 #define POT_FILTER         0.2f     /* exponential moving average */
 
-static sht3x_t  s_sht;
-static bool     s_sht_present;
+/* The temperature sensor is found at run time, so the same firmware works
+ * with whatever module is on the bus: SHT3x first, then BME280 / BMP280. */
+typedef enum { TS_NONE = 0, TS_SHT3X, TS_BME280 } temp_sensor_t;
+
+static const i2c_bus_t *s_bus;
+static temp_sensor_t    s_kind;
+static sht3x_t          s_sht;
+static bme280_t         s_bme;
+
+typedef struct {
+    int16_t  temp_c100;
+    uint16_t hum_c100;
+    uint32_t press_pa;
+} temp_sample_t;
+
+static const char *kind_name(void)
+{
+    switch (s_kind) {
+    case TS_SHT3X:  return "SHT3x";
+    case TS_BME280: return s_bme.has_humidity ? "BME280" : "BMP280";
+    default:        return "none";
+    }
+}
+
+static temp_sensor_t detect(void)
+{
+    static const uint8_t sht_addr[] = { SHT3X_ADDR_DEFAULT, SHT3X_ADDR_ALT };
+    static const uint8_t bme_addr[] = { BME280_ADDR_DEFAULT, BME280_ADDR_ALT };
+    for (unsigned i = 0U; i < sizeof sht_addr; i++) {
+        if (sht3x_init(&s_sht, s_bus, sht_addr[i], bsp_delay_ms) == ERR_OK) {
+            return TS_SHT3X;
+        }
+    }
+    for (unsigned i = 0U; i < sizeof bme_addr; i++) {
+        if (bme280_init(&s_bme, s_bus, bme_addr[i], bsp_delay_ms) == ERR_OK) {
+            return TS_BME280;
+        }
+    }
+    return TS_NONE;
+}
+
+static int measure(temp_sample_t *out)
+{
+    int rc = ERR_NOT_FOUND;
+    if (s_kind == TS_SHT3X) {
+        sht3x_sample_t s;
+        rc = sht3x_measure(&s_sht, &s);
+        out->temp_c100 = s.temp_c100;
+        out->hum_c100  = s.hum_c100;
+        out->press_pa  = 0U;
+    } else if (s_kind == TS_BME280) {
+        bme280_sample_t s;
+        rc = bme280_measure(&s_bme, &s);
+        out->temp_c100 = s.temp_c100;
+        out->hum_c100  = s.hum_c100;
+        out->press_pa  = s.press_pa;
+    }
+    return rc;
+}
+
+static void publish_sensor_name(void)
+{
+    sys_lock();
+    sys_data()->m.sensor_name = kind_name();
+    sys_unlock();
+}
 
 void sensors_init(const i2c_bus_t *bus)
 {
-    s_sht_present = (sht3x_init(&s_sht, bus, SHT3X_ADDR_DEFAULT, bsp_delay_ms) == ERR_OK);
-    log_printf("SENS", "SHT3x %s at 0x%02X", s_sht_present ? "found" : "NOT found", SHT3X_ADDR_DEFAULT);
+    s_bus  = bus;
+    s_kind = detect();
+    if (s_kind == TS_SHT3X) {
+        log_printf("SENS", "SHT3x found at 0x%02X", s_sht.addr);
+    } else if (s_kind == TS_BME280) {
+        log_printf("SENS", "%s found at 0x%02X (id 0x%02X)", kind_name(), s_bme.addr, s_bme.chip_id);
+    } else {
+        log_printf("SENS", "no temperature sensor (SHT3x 0x44/45, BME280 0x76/77)");
+    }
+    publish_sensor_name();
 }
 
 static void handle_button(uint32_t *held_ms, bool *stable, uint8_t *count)
@@ -79,28 +152,36 @@ void sensors_task(void *arg)
         }
 
         if (t % SHT_PERIOD_MS == 0U) {
-            if (!s_sht_present && t >= retry_at) {
-                /* hot-plug / recovery: try to find the sensor again */
-                s_sht_present = (sht3x_soft_reset(&s_sht) == ERR_OK);
+            if (s_kind == TS_NONE && t >= retry_at) {
+                /* hot-plug / recovery: look for a sensor again */
+                s_kind = detect();
                 retry_at = t + SHT_RETRY_MS;
+                if (s_kind != TS_NONE) {
+                    log_printf("SENS", "%s found", kind_name());
+                    publish_sensor_name();
+                }
             }
-            sht3x_sample_t s;
-            int rc = s_sht_present ? sht3x_measure(&s_sht, &s) : ERR_NOT_FOUND;
+            temp_sample_t s;
+            int rc = (s_kind != TS_NONE) ? measure(&s) : ERR_NOT_FOUND;
             sys_lock();
             sys_data_t *d = sys_data();
             if (rc == ERR_OK) {
                 sht_errors       = 0U;
                 d->m.temp_c      = s.temp_c100 / 100.0f;
                 d->m.hum_pct     = s.hum_c100 / 100.0f;
+                d->m.press_hpa   = s.press_pa / 100.0f;
                 d->m.temp_valid  = true;
             } else {
                 d->m.sensor_errors++;
                 if (sht_errors < SHT_MAX_ERRORS) {
                     sht_errors++;
                 }
-                if (sht_errors >= SHT_MAX_ERRORS) {
+                if (sht_errors >= SHT_MAX_ERRORS && s_kind != TS_NONE) {
+                    d->m.temp_valid  = false;
+                    d->m.sensor_name = "none";
+                    s_kind = TS_NONE;
+                } else if (sht_errors >= SHT_MAX_ERRORS) {
                     d->m.temp_valid = false;
-                    s_sht_present   = false;
                 }
             }
             sys_unlock();
