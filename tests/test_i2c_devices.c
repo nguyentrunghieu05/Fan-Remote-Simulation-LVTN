@@ -24,6 +24,8 @@ static struct {
     bool    nack;
     uint8_t addr;
     int     measurements;
+    int     busy_polls;     /* status reads that still report "measuring", -1 = stuck */
+    int     status_reads;
 } bme;
 
 static void put16le(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
@@ -65,6 +67,11 @@ static int bme_read(void *c, uint8_t a, uint8_t *d, size_t n)
 {
     (void)c;
     if (bme.nack || a != bme.addr) return ERR_IO;
+    if (bme.ptr == 0xF3) {
+        bme.status_reads++;
+        bme.reg[0xF3] = (bme.busy_polls != 0) ? 0x08 : 0x00;
+        if (bme.busy_polls > 0) bme.busy_polls--;
+    }
     for (size_t i = 0; i < n; i++) { d[i] = bme.reg[(uint8_t)(bme.ptr + i)]; }
     return ERR_OK;
 }
@@ -134,6 +141,14 @@ static void bme_over_i2c(void)
 
     bme_chip(BME280_CHIP_ID, BME280_ADDR_DEFAULT);
     CHECK_EQ(bme280_init(&d, &bus, BME280_ADDR_DEFAULT, no_delay), ERR_OK);
+    bme.status_reads = 0;
+    bme.busy_polls = 2;                                  /* conversion slower than 10 ms */
+    CHECK_EQ(bme280_measure(&d, &s), ERR_OK);
+    CHECK_EQ(bme.status_reads, 3);                       /* busy, busy, done */
+    CHECK_EQ(s.temp_c100, 2508);
+    bme.busy_polls = -1;                                 /* measuring bit stuck */
+    CHECK_EQ(bme280_measure(&d, &s), ERR_TIMEOUT);
+    bme.busy_polls = 0;
     bme.reg[0xFA] = 0x80; bme.reg[0xFB] = 0; bme.reg[0xFC] = 0;   /* "skipped" marker */
     CHECK_EQ(bme280_measure(&d, &s), ERR_STATE);
     bme.nack = true;                                     /* cable pulled */
