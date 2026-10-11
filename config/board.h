@@ -22,6 +22,7 @@
  *  Fan 0-10 V (via op-amp x3) DAC1_OUT1 PA4                 A2
  *  Fan tachometer       TIM2_CH1     PA0 (AF2)              A0
  *  Speed knob (pot)     ADC1_IN1     PA1                    A1
+ *  12 V supply monitor  ADC1_IN6     PA6 (47k/10k divider)  D12
  *  Alarm relay          GPIO         PC0                    A5 (CN8-6)
  *  Status LED           GPIO         PA5                    LD4 (on board)
  *  User button          GPIO         PC13                   B1  (on board)
@@ -125,6 +126,14 @@
 #define POT_ADC_PORT            GPIOA
 #define POT_ADC_PIN             GPIO_PIN_1
 #define POT_ADC_CHANNEL         ADC_CHANNEL_1
+
+/* 12 V fan supply through a divider: 12V -- R1 47k -- PA6 -- R2 10k -- GND.
+ * 12 V gives 2.1 V on the pin; full scale (3.3 V) is about 18.8 V. */
+#define VBUS_ADC_PORT           GPIOA
+#define VBUS_ADC_PIN            GPIO_PIN_6
+#define VBUS_ADC_CHANNEL        ADC_CHANNEL_6
+#define VBUS_DIV_R1_OHM         47000UL
+#define VBUS_DIV_R2_OHM         10000UL
 
 /* ---- Simple I/O ---- */
 #define RELAY_PORT              GPIOC
