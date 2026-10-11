@@ -10,6 +10,7 @@
 #include "timeconv.h"
 #include "modbus_server.h"
 #include "radio_link.h"
+#include "can_link.h"
 #include "supervisor.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -313,6 +314,14 @@ static int cmd_stats(cli_t *c, int argc, char *argv[])
     cli_printf(c, "modbus  frames %lu  crc_err %lu  exceptions %lu  uart_err %lu\r\n", (unsigned long)f,
                (unsigned long)e, (unsigned long)x, (unsigned long)bsp_uart_errors(BSP_UART_RS485));
     cli_printf(c, "lora    sent %lu  acked %lu  cmds %lu\r\n", (unsigned long)s, (unsigned long)a, (unsigned long)k);
+    can_link_stats_t cs;
+    can_link_stats(&cs);
+    if (cs.present) {
+        cli_printf(c, "can     sent %lu  dropped %lu  rx %lu  tec %u  rec %u\r\n", (unsigned long)cs.sent,
+                   (unsigned long)cs.busy, (unsigned long)cs.received, cs.tec, cs.rec);
+    } else {
+        cli_printf(c, "can     no MCP2515\r\n");
+    }
     return 0;
 }
 
@@ -338,7 +347,7 @@ static const cli_cmd_t s_cmds[] = {
     { "time",     "show | set <unix>",                      cmd_time },
     { "fault",    "clear latched faults",                   cmd_fault },
     { "tasks",    "RTOS tasks, stack and CPU usage",        cmd_tasks },
-    { "stats",    "Modbus / LoRa counters",                 cmd_stats },
+    { "stats",    "Modbus / LoRa / CAN counters",           cmd_stats },
     { "reboot",   "software reset",                         cmd_reboot },
 };
 

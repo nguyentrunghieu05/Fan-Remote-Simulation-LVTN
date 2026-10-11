@@ -9,6 +9,7 @@
  *  sensors      3    10 ms                    button, knob, tach, SHT31
  *  link         2    LoRa RX (IRQ) / 100 ms   telemetry upload, commands
  *  storage      2    1 s                      data log on SPI flash
+ *  can          2    1 s                      fan data on CAN (MCP2515)
  *  display      1    500 ms                   OLED status screen
  *  console      1    UART RX (IRQ)            command line
  *  supervisor   1    250 ms                   per-task watchdog -> IWDG
@@ -25,6 +26,7 @@
 #include "display.h"
 #include "modbus_server.h"
 #include "radio_link.h"
+#include "can_link.h"
 #include "console.h"
 #include "supervisor.h"
 #include "FreeRTOS.h"
@@ -83,6 +85,7 @@ static void init_task(void *arg)
     /* 4. communication and control */
     modbus_server_init();
     radio_link_init();
+    can_link_init();                /* after storage_init(): shares its SPI bus */
     control_init();
 
     /* 5. application tasks (stack in 32-bit words) */
@@ -91,6 +94,7 @@ static void init_task(void *arg)
     start(sensors_task,       "sensors",  384, 3);
     start(radio_link_task,    "link",     512, 2);
     start(storage_task,       "storage",  384, 2);
+    start(can_link_task,      "can",      320, 2);
     start(display_task,       "display",  384, 1);
     start(console_task,       "console",  512, 1);
     start(sv_task,            "superv",   256, 1);
