@@ -60,6 +60,9 @@ bool bsp_i2c_probe(uint8_t addr);
 /* ---- analog / timers ---- */
 void     bsp_adc_init(void);
 uint16_t bsp_adc_read_pot(void);        /* 0..4095 */
+/* The ADC is shared: call the bsp_adc_* readers from one task (sensors). */
+uint16_t bsp_adc_vdd_mv(void);          /* VDDA from VREFINT and its factory calibration */
+uint32_t bsp_adc_vbus_mv(void);         /* 12 V supply through the board.h divider */
 void     bsp_fan_out_init(void);
 void     bsp_fan_out_set(float percent);/* PWM duty + DAC voltage together */
 void     bsp_tach_init(void);

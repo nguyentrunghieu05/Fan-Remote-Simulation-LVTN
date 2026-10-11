@@ -1,6 +1,6 @@
 /**
  * @file    bsp_analog.c
- * @brief   ADC (speed knob), fan outputs (PWM + DAC) and tachometer.
+ * @brief   ADC (speed knob, VDD via VREFINT, 12 V supply), fan outputs (PWM + DAC) and tachometer.
  *
  * Fan output: the same duty is sent two ways so the board drives both fan
  * types used in industry:
@@ -33,6 +33,8 @@ void bsp_adc_init(void)
     g.Mode = GPIO_MODE_ANALOG;
     g.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(POT_ADC_PORT, &g);
+    g.Pin  = VBUS_ADC_PIN;
+    HAL_GPIO_Init(VBUS_ADC_PORT, &g);
 
     s_adc.Instance                   = ADC1;
     s_adc.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV2;
@@ -46,6 +48,7 @@ void bsp_adc_init(void)
     s_adc.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
     s_adc.Init.Overrun               = ADC_OVR_DATA_OVERWRITTEN;
     s_adc.Init.SamplingTimeCommon1   = ADC_SAMPLETIME_79CYCLES_5;  /* pot is high impedance */
+    s_adc.Init.SamplingTimeCommon2   = ADC_SAMPLETIME_160CYCLES_5; /* VREFINT needs >= 4 us: 5 us at 32 MHz */
     s_adc.Init.OversamplingMode      = ENABLE;                     /* 16x hardware average */
     s_adc.Init.Oversampling.Ratio         = ADC_OVERSAMPLING_RATIO_16;
     s_adc.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_4;
@@ -59,8 +62,15 @@ void bsp_adc_init(void)
     (void)HAL_ADCEx_Calibration_Start(&s_adc);
 }
 
-uint16_t bsp_adc_read_pot(void)
+/* One conversion of one channel: rank 1 of the sequencer is switched to it. */
+static uint16_t adc_read(uint32_t channel, uint32_t sampling)
 {
+    ADC_ChannelConfTypeDef ch = { 0 };
+    ch.Channel      = channel;
+    ch.Rank         = ADC_REGULAR_RANK_1;
+    ch.SamplingTime = sampling;
+    (void)HAL_ADC_ConfigChannel(&s_adc, &ch);
+
     uint16_t v = 0U;
     if (HAL_ADC_Start(&s_adc) == HAL_OK &&
         HAL_ADC_PollForConversion(&s_adc, 5U) == HAL_OK) {
@@ -68,6 +78,29 @@ uint16_t bsp_adc_read_pot(void)
     }
     (void)HAL_ADC_Stop(&s_adc);
     return v;
+}
+
+uint16_t bsp_adc_read_pot(void)
+{
+    return adc_read(POT_ADC_CHANNEL, ADC_SAMPLINGTIME_COMMON_1);
+}
+
+uint16_t bsp_adc_vdd_mv(void)
+{
+    uint16_t raw = adc_read(ADC_CHANNEL_VREFINT, ADC_SAMPLINGTIME_COMMON_2);
+    if (raw == 0U) {
+        return 0U;
+    }
+    /* VDDA = 3.0 V * VREFINT_CAL / raw (VREFINT_CAL measured at 3.0 V in the factory) */
+    return (uint16_t)__LL_ADC_CALC_VREFANALOG_VOLTAGE(raw, LL_ADC_RESOLUTION_12B);
+}
+
+uint32_t bsp_adc_vbus_mv(void)
+{
+    uint32_t vdd = bsp_adc_vdd_mv();
+    uint32_t raw = adc_read(VBUS_ADC_CHANNEL, ADC_SAMPLINGTIME_COMMON_1);
+    uint32_t pin_mv = raw * vdd / 4095U;
+    return pin_mv * (VBUS_DIV_R1_OHM + VBUS_DIV_R2_OHM) / VBUS_DIV_R2_OHM;
 }
 
 /* ------------------------------------------------------- fan outputs */
