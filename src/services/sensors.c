@@ -1,6 +1,7 @@
 #include "sensors.h"
 #include "sht3x.h"
 #include "bme280.h"
+#include "power.h"
 #include "sys_data.h"
 #include "supervisor.h"
 #include "bsp.h"
@@ -15,6 +16,7 @@
 #define SHT_MAX_ERRORS     3U       /* consecutive errors before "invalid" */
 #define SHT_RETRY_MS       10000U
 #define POT_FILTER         0.2f     /* exponential moving average */
+#define POWER_PERIOD_MS    500U
 
 /* The temperature sensor is found at run time, so the same firmware works
  * with whatever module is on the bus: SHT3x first, then BME280 / BMP280. */
@@ -149,6 +151,10 @@ void sensors_task(void *arg)
             sys_data()->m.pot_percent = pot;
             sys_data()->m.rpm         = rpm;
             sys_unlock();
+        }
+
+        if (t % POWER_PERIOD_MS == 0U) {
+            power_sample();                 /* same task as the knob: one ADC user */
         }
 
         if (t % SHT_PERIOD_MS == 0U) {
