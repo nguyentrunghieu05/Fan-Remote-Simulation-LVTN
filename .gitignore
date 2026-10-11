@@ -14,3 +14,7 @@ Release/
 # STM32CubeIDE workspace
 .metadata/
 *.launch
+
+# Editor / local tools
+.vscode/
+.venv/
