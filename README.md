@@ -6,8 +6,8 @@ kiến trúc phân lớp, và dùng đủ ba chuẩn giao tiếp **UART, SPI, I2
 
 | Chức năng | Chuẩn | Thiết bị |
 |---|---|---|
-| Điều tốc quạt tự động theo nhiệt độ (PID) | I2C | Cảm biến SHT31 (nhiệt độ, độ ẩm) |
-| Màn hình trạng thái tại chỗ | I2C (chung bus) | OLED SSD1306 128x64 |
+| Điều tốc quạt tự động theo nhiệt độ (PID) | I2C | Cảm biến BME280 / BMP280 hoặc SHT31 (tự nhận) |
+| Màn hình trạng thái tại chỗ | I2C (chung bus) | LCD 1602 + PCF8574 hoặc OLED SSD1306 (tự nhận) |
 | Lưu dữ liệu đo khi mất mạng, lưu cấu hình | SPI | Flash W25Q64 (8 MB) |
 | Giao tiếp PLC / HMI / SCADA | UART + RS485 | Modbus RTU slave |
 | Gửi dữ liệu từ xa, nhận lệnh | UART | Module LoRa Ebyte E220 / E32 |
@@ -38,7 +38,7 @@ kiến trúc phân lớp, và dùng đủ ba chuẩn giao tiếp **UART, SPI, I2
 ```
 
 Nguyên tắc: mỗi lớp chỉ gọi lớp ngay dưới. Driver thiết bị (W25Q, SHT3x,
-SSD1306) chỉ biết `spi_bus_t` / `i2c_bus_t` trong `src/common/bus.h`, không
+BME280, SSD1306, LCD1602) chỉ biết `spi_bus_t` / `i2c_bus_t` trong `src/common/bus.h`, không
 biết HAL. Vì vậy cùng một mã driver chạy trên STM32 và chạy trong unit test
 trên máy tính với thiết bị giả lập. Đổi board chỉ cần sửa `config/board.h`
 và `src/bsp/`.
@@ -49,10 +49,10 @@ và `src/bsp/`.
 |---|---|---|---|
 | control | 5 | 100 ms | máy trạng thái, phát hiện lỗi, PID, ngõ ra, relay, LED |
 | modbus | 4 | ngắt "hết khung" RS485 | Modbus RTU slave |
-| sensors | 3 | 10 ms | nút nhấn (chống dội), biến trở, tach, SHT31 mỗi 1 s |
+| sensors | 3 | 10 ms | nút nhấn (chống dội), biến trở, tach, cảm biến nhiệt mỗi 1 s |
 | link | 2 | ngắt UART LoRa / 100 ms | gửi dữ liệu, chờ ACK, nhận lệnh |
 | storage | 2 | 1 s | ghi log lên SPI flash theo chu kỳ cấu hình |
-| display | 1 | 500 ms | màn hình OLED |
+| display | 1 | 500 ms | màn hình LCD 1602 hoặc OLED |
 | console | 1 | ngắt UART | dòng lệnh |
 | superv | 1 | 250 ms | watchdog từng task, nạp IWDG |
 | init | 6 | 1 lần khi khởi động | khởi tạo thiết bị rồi tự xoá |
@@ -85,7 +85,7 @@ chỉ là cảnh báo.
 | LoRa TX / RX | PC10 / PC11 (USART3) | CN7-1 / CN7-2 | E220: RXD / TXD |
 | LoRa M0 / M1 | PC2 / PC3 | CN7-35 / CN7-37 | E220: M0 / M1 |
 | SPI flash SCK / MISO / MOSI / CS | PB13 / PB14 / PB15 / PB12 (SPI2) | CN10 | W25Q64: CLK / DO / DI / CS |
-| I2C SCL / SDA | PB8 / PB9 (I2C1) | D15 / D14 | SHT31 + SSD1306, pull-up 4.7 kΩ |
+| I2C SCL / SDA | PB8 / PB9 (I2C1) | D15 / D14 | BME280 + LCD 1602 (hoặc SHT31 + SSD1306), pull-up 4.7 kΩ |
 | PWM quạt | PA8 (TIM1_CH1) | D7 | dây PWM quạt 4 dây (qua transistor nếu cần 5 V) |
 | 0-10 V | PA4 (DAC1) | A2 | op-amp khuếch đại x3 |
 | Tach | PA0 (TIM2_CH1) | A0 | dây tach (open collector, có pull-up) |
@@ -97,7 +97,26 @@ Trước khi đấu dây, kiểm tra lại từng chân với datasheet STM32G0B
 Alternate functions) và tài liệu Nucleo UM2324. Toàn bộ chân nằm trong
 `config/board.h`.
 
-Không có SPI flash, cảm biến hay OLED firmware vẫn chạy: nó báo "NOT found"
+### Cảm biến và màn hình I2C: tự nhận
+
+Lúc khởi động (và thử lại mỗi 10 s nếu chưa thấy) firmware dò bus I2C:
+
+| Loại | Thử lần lượt | Địa chỉ |
+|---|---|---|
+| Cảm biến nhiệt | SHT3x, rồi BME280 / BMP280 (đọc thanh ghi ID 0xD0: 0x60 / 0x58) | 0x44, 0x45, rồi 0x76, 0x77 |
+| Màn hình | OLED SSD1306, rồi LCD 16x2 qua PCF8574 | 0x3C, rồi 0x27, 0x3F |
+
+Log khởi động cho biết đã nhận gì, ví dụ `SENS BME280 found at 0x76 (id 0x60)`
+và `DISP LCD 16x2 (PCF8574) found at 0x27`. Lệnh `i2c` liệt kê địa chỉ đang trả
+lời kèm tên đoán. BMP280 không có độ ẩm nên lệnh `status` báo độ ẩm 0.
+
+Đấu dây: VCC 3.3 V, GND, SDA vào D14, SCL vào D15. Phần lớn module BME280 và
+PCF8574 đã có sẵn điện trở kéo lên. LCD 1602 thường cần 5 V mới đủ tương phản;
+nếu cấp 5 V cho module PCF8574 thì chân SDA/SCL bị kéo lên 5 V: PB8/PB9 chịu
+được 5 V (FT) nhưng hãy kiểm tra lại datasheet, hoặc dùng module chuyển mức.
+Chỉnh biến trở xanh sau LCD nếu thấy màn sáng mà không có chữ.
+
+Không có SPI flash, cảm biến hay màn hình firmware vẫn chạy: nó báo "NOT found"
 và tiếp tục (đã kiểm tra trên giả lập, xem mục 5).
 
 ## 3. Build và nạp
@@ -202,12 +221,13 @@ cho phép xoá bit 1 → 0 không cần xoá sector).
 
 ## 5. Kiểm thử
 
-**Unit test trên máy tính** (`make test`): 23 bài, 391 phép kiểm tra, biên
+**Unit test trên máy tính** (`make test`): 444 phép kiểm tra, biên
 dịch với AddressSanitizer và UBSan. Gồm: vector chuẩn của CRC, khung Modbus
 đúng / sai CRC / sai địa chỉ / broadcast, PID chống bão hoà tích phân, mô
 phỏng nhiệt vòng kín hội tụ về setpoint, log flash qua quấn vòng và khởi
 động lại, mất điện giữa lúc ghi log và lúc lưu cấu hình, driver W25Q chạy
-với chip giả lập giải mã lệnh SPI, driver SHT3x với CRC sai và NACK.
+với chip giả lập giải mã lệnh SPI, driver SHT3x với CRC sai và NACK, driver BME280 với vector
+bù trừ trong datasheet, driver LCD1602 với mô hình HD44780 giải mã từng byte PCF8574.
 
 **App giả lập trên trình duyệt** (`tools/simulator/fan_sim.html`): mở trực
 tiếp bằng Chrome / Edge, không cần cài gì. Các file C thật của firmware
@@ -215,7 +235,7 @@ tiếp bằng Chrome / Edge, không cần cài gì. Các file C thật của fir
 `telemetry`, `datalog`, `cli`, driver `w25qxx`, `sht3x`, `ssd1306`) được biên
 dịch sang JavaScript (`fan_sim_core.js`, bằng `build_sim.sh`: clang → WebAssembly
 → wasm2js). `sim_board.c` thay phần cứng: mô hình nhiệt của máy và quạt, chip
-W25Q64 / SHT31 / SSD1306 giả lập ở mức byte trên bus SPI / I2C, và một vòng
+W25Q64 / SHT31 / SSD1306 (nhánh SHT31 + OLED của bộ tự nhận) giả lập ở mức byte trên bus SPI / I2C, và một vòng
 100 ms gọi các bước giống các task trên chip. Trong app có màn hình OLED vẽ từ
 GDDRAM, LED, relay, đồ thị đáp ứng PID, console CLI, Modbus master (gửi khung
 có CRC, giải mã trả lời và exception), LoRa gateway ($FAN / $ACK / $CMD), và
@@ -244,7 +264,7 @@ linker/        STM32G0B1RETX_FLASH.ld (512 KB flash, 144 KB RAM)
 startup/       startup_stm32g0b1xx.s, system_stm32g0xx.c (của ST)
 src/common/    err.h, bus.h
 src/bsp/       lớp phần cứng
-src/drivers/   W25Qxx, SHT3x, SSD1306
+src/drivers/   W25Qxx, SHT3x, BME280, SSD1306, LCD1602
 src/middleware/ thư viện thuần C
 src/services/  các task
 src/app/       main, máy trạng thái, luật điều khiển
