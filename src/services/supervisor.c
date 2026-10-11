@@ -47,10 +47,33 @@ void sv_kick(int id)
     }
 }
 
+int sv_count(void)
+{
+    return s_count;
+}
+
+bool sv_info(int i, sv_info_t *out)
+{
+    if (i < 0 || i >= s_count) {
+        return false;
+    }
+    out->name       = s_cli[i].name;
+    out->timeout_ms = s_cli[i].timeout_ms;
+    out->age_ms     = bsp_millis() - s_cli[i].last_ms;
+    return true;
+}
+
+uint32_t sv_iwdg_timeout_ms(void)
+{
+    return IWDG_TIMEOUT_MS;
+}
+
 void sv_task(void *arg)
 {
     (void)arg;
     bsp_iwdg_init(IWDG_TIMEOUT_MS);
+    log_printf("WDG", "IWDG %lu ms, %lu watchdog reset(s) since power-up",
+               (unsigned long)IWDG_TIMEOUT_MS, (unsigned long)bsp_wdt_reset_count());
     bool reported = false;
     for (;;) {
         uint32_t now = bsp_millis();

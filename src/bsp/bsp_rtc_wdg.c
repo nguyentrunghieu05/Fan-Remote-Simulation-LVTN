@@ -4,13 +4,16 @@
  *
  * RTC clock: LSE 32.768 kHz crystal (fitted on the Nucleo, X2). If the
  * crystal does not start, LSI (~32 kHz, less accurate) is used instead.
- * A backup register marks whether the time has been set since power-up.
+ * Backup register DR0 marks whether the time has been set since power-up,
+ * DR1 counts resets caused by the independent watchdog.
  */
 #include "bsp.h"
 #include "board.h"
 #include "timeconv.h"
+#include <string.h>
 
-#define RTC_MAGIC   0x32F2U
+#define RTC_MAGIC      0x32F2U
+#define WDT_COUNT_REG  RTC_BKP_DR1     /* number of IWDG resets */
 
 static RTC_HandleTypeDef  s_rtc;
 static IWDG_HandleTypeDef s_iwdg;
@@ -49,6 +52,21 @@ void bsp_rtc_init(void)
     s_rtc.Init.OutPutType     = RTC_OUTPUT_TYPE_OPENDRAIN;
     s_rtc.Init.OutPutPullUp   = RTC_OUTPUT_PULLUP_NONE;
     (void)HAL_RTC_Init(&s_rtc);
+
+    /* bsp_clock_init() has already read the reset flags. */
+    if (strcmp(bsp_reset_cause(), "IWDG") == 0) {
+        HAL_RTCEx_BKUPWrite(&s_rtc, WDT_COUNT_REG, HAL_RTCEx_BKUPRead(&s_rtc, WDT_COUNT_REG) + 1U);
+    }
+}
+
+uint32_t bsp_wdt_reset_count(void)
+{
+    return HAL_RTCEx_BKUPRead(&s_rtc, WDT_COUNT_REG);
+}
+
+void bsp_wdt_reset_count_clear(void)
+{
+    HAL_RTCEx_BKUPWrite(&s_rtc, WDT_COUNT_REG, 0U);
 }
 
 bool bsp_rtc_is_set(void)

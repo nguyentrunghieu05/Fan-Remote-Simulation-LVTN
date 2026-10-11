@@ -14,10 +14,20 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define SV_MAX_CLIENTS  8
+#define SV_MAX_CLIENTS  12
+
+typedef struct {
+    const char *name;
+    uint32_t    timeout_ms;   /* deadline between two kicks */
+    uint32_t    age_ms;       /* time since the last kick   */
+} sv_info_t;
 
 int  sv_register(const char *name, uint32_t timeout_ms);
 void sv_kick(int id);
+/** For the "wdt" command: number of supervised tasks and one entry. */
+int  sv_count(void);
+bool sv_info(int i, sv_info_t *out);
+uint32_t sv_iwdg_timeout_ms(void);
 /** Long blocking job (flash erase): keep the IWDG fed, ignore task deadlines. */
 void sv_maintenance(bool on);
 void sv_task(void *arg);
