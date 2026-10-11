@@ -1,0 +1,579 @@
+<title>Giả lập bộ điều khiển quạt</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: lab bench. Left = the board as you would see it on the desk (OLED, LEDs, readouts),
+   right = the world around it (machine heat, faults to inject). Below: trend, then the three UARTs. */
+:root {
+  --bg: #e9edf0; --panel: #f8fafb; --line: #cfd6dc; --fg: #1b2329; --muted: #5d6a74;
+  --accent: #1d5fa8; --heat: #c4561d; --cool: #13817a; --warn: #b07d00; --bad: #b3261e;
+  --pcb: #12384a; --oled-bg: #050b10; --oled-px: #7fd7ff; --term-bg: #10181d; --term-fg: #cfe3ea;
+  --f-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12171b; --panel: #192025; --line: #2c363d; --fg: #dde5ea; --muted: #8e9ca6;
+  --accent: #6fa8e6; --heat: #f08a4b; --cool: #3cc2b5; --warn: #e2b23c; --bad: #f2766c;
+  --pcb: #0e2c3a; --term-bg: #0a0f12; --term-fg: #cfe3ea; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12171b; --panel: #192025; --line: #2c363d; --fg: #dde5ea; --muted: #8e9ca6;
+  --accent: #6fa8e6; --heat: #f08a4b; --cool: #3cc2b5; --warn: #e2b23c; --bad: #f2766c;
+  --pcb: #0e2c3a; --term-bg: #0a0f12; --term-fg: #cfe3ea; color-scheme: dark }
+
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--f-body); margin: 0 }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 18px 40px; display: grid; gap: 16px }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px }
+h1 { font: 600 30px/1.05 var(--f-display); letter-spacing: .01em; margin: 0; text-wrap: balance }
+.sub { color: var(--muted); margin: 4px 0 0; max-width: 70ch }
+.runbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+button, select, input[type=text], input[type=number] {
+  font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px }
+button { cursor: pointer; font-weight: 500 }
+button:hover { border-color: var(--accent) }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent) }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden }
+.seg button { border: 0; border-radius: 0; padding: 6px 9px }
+.seg button[aria-pressed=true] { background: var(--fg); color: var(--bg) }
+.clock { font: 500 13px var(--f-mono); color: var(--muted); min-width: 9ch; text-align: right }
+
+.top { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px }
+@media (max-width: 860px) { .top { grid-template-columns: minmax(0, 1fr) } }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0 }
+h2 { font: 600 13px var(--f-body); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px }
+
+/* the board */
+.board { background: var(--pcb); border-radius: 10px; padding: 14px; color: #d8e6ec; display: grid;
+  grid-template-columns: auto minmax(0, 1fr); gap: 14px; align-items: start }
+@media (max-width: 520px) { .board { grid-template-columns: minmax(0, 1fr) } }
+.oled { background: var(--oled-bg); border: 6px solid #1b1f22; border-radius: 4px; padding: 4px; width: 100%; max-width: 300px }
+.oled canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; aspect-ratio: 2 / 1 }
+.silk { font: 500 10px var(--f-mono); letter-spacing: .08em; color: #9fc0cc; margin-top: 6px }
+.ios { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px 12px; align-content: start }
+.io { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0 }
+.led { width: 12px; height: 12px; border-radius: 50%; background: #2a3b42; box-shadow: inset 0 0 0 1px #0006; flex: none }
+.led.on.g { background: #39e07a; box-shadow: 0 0 8px #39e07a }
+.led.on.r { background: #ff5a4a; box-shadow: 0 0 8px #ff5a4a }
+.b1 { background: #1f5fbf; color: #fff; border: 0; border-radius: 50%; width: 34px; height: 34px; font-size: 11px; padding: 0 }
+.state { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.pill { font: 600 12px var(--f-mono); padding: 3px 9px; border-radius: 99px; background: #ffffff1f; letter-spacing: .05em }
+.pill.FAULT { background: #ff5a4a; color: #200 } .pill.AUTO { background: #39e07a; color: #032 }
+.pill.MANUAL { background: #ffd34d; color: #320 } .pill.OFF { background: #ffffff2e }
+.fault-chip { font: 500 11px var(--f-mono); padding: 2px 7px; border-radius: 4px; background: #ff5a4a33; color: #ffb4ab }
+
+.readouts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px }
+.ro { border-top: 2px solid var(--line); padding-top: 6px }
+.ro .k { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted) }
+.ro .v { font: 600 30px/1.1 var(--f-display); font-variant-numeric: tabular-nums }
+.ro .v small { font: 500 14px var(--f-body); color: var(--muted); margin-left: 3px }
+@media (max-width: 520px) { .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+.ro.t { border-color: var(--heat) } .ro.sp { border-color: var(--accent) } .ro.d { border-color: var(--cool) }
+
+/* plant */
+.ctl { display: grid; gap: 12px }
+.slider { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center }
+.slider label { font-weight: 500 }
+.slider output { font: 500 13px var(--f-mono); font-variant-numeric: tabular-nums }
+.slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent) }
+.slider .hint { grid-column: 1 / -1; font-size: 12px; color: var(--muted) }
+.toggles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px }
+.tg { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer }
+.tg input { accent-color: var(--bad) }
+.tg.ok input { accent-color: var(--cool) }
+.scen { display: flex; flex-wrap: wrap; gap: 6px }
+
+/* chart */
+.chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: baseline }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted) }
+.legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px }
+#chart { width: 100%; height: 260px; display: block }
+
+/* uarts */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 10px }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 10px; color: var(--muted) }
+.tabs button[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent) }
+.tabs .port { font: 400 11px var(--f-mono); margin-left: 5px }
+.term { background: var(--term-bg); color: var(--term-fg); font: 12.5px/1.5 var(--f-mono); padding: 10px 12px; border-radius: 6px;
+  height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0 }
+.term .tx { color: #ffd38a } .term .rx { color: #8fe3b5 } .term .ev { color: #8fb9ff }
+.inrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px }
+.inrow input[type=text] { flex: 1 1 220px; font-family: var(--f-mono); min-width: 0 }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px }
+.quick button { font-size: 12.5px; padding: 4px 8px }
+[data-pane=console] .quick button { font-family: var(--f-mono) }
+.mbgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; align-items: end }
+.mbgrid label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0 }
+.mbgrid select, .mbgrid input { width: 100%; min-width: 0 }
+.hex { font: 13px var(--f-mono); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: nowrap }
+.hexlbl { font-size: 12px; color: var(--muted); margin: 10px 0 3px }
+table { border-collapse: collapse; width: 100%; font-size: 13px }
+td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line) }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 500 }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
+.tblwrap { overflow-x: auto; margin-top: 8px }
+.note { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
+.err { color: var(--bad) }
+footer { font-size: 12px; color: var(--muted); max-width: 90ch }
+code { font-family: var(--f-mono); font-size: .92em }
+@media (prefers-reduced-motion: reduce) { .led.on { box-shadow: none } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Giả lập bộ điều khiển quạt STM32G0B1RE</h1>
+      <p class="sub">Firmware C thật (FSM, PID, fault, Modbus, datalog, driver W25Q64 / SHT31 / SSD1306) được biên dịch sang JavaScript và chạy trên mô hình nhiệt của máy và quạt.</p>
+    </div>
+    <div class="runbar">
+      <button id="run" class="primary" aria-pressed="true">Tạm dừng</button>
+      <div class="seg" role="group" aria-label="Tốc độ mô phỏng">
+        <button data-speed="1" aria-pressed="true">1×</button>
+        <button data-speed="5" aria-pressed="false">5×</button>
+        <button data-speed="20" aria-pressed="false">20×</button>
+        <button data-speed="60" aria-pressed="false">60×</button>
+      </div>
+      <button id="reset" title="Nút RESET: flash giữ nguyên log">Reset MCU</button>
+      <button id="power" title="Tắt nguồn và bật lại từ đầu, xoá flash">Bật lại từ đầu</button>
+      <span class="clock" id="clock">0:00</span>
+    </div>
+  </header>
+
+  <div class="top">
+    <section class="panel" aria-label="Bo mạch">
+      <h2>Bo mạch NUCLEO-G0B1RE</h2>
+      <div class="board">
+        <div>
+          <div class="oled"><canvas id="oled" width="128" height="64" aria-label="Màn hình OLED SSD1306"></canvas></div>
+          <div class="silk">SSD1306 128×64 · I2C1 0x3C</div>
+        </div>
+        <div class="ios">
+          <div class="io"><span class="led g" id="ld4"></span>LD4 trạng thái (PA5)</div>
+          <div class="io"><span class="led r" id="relay"></span>Relay báo động (PC0)</div>
+          <div class="io"><span class="led g" id="ldflash"></span>W25Q64 (SPI2)</div>
+          <div class="io"><span class="led g" id="ldsht"></span>SHT31 (I2C1 0x44)</div>
+          <div class="io"><span class="led g" id="ldlora"></span>LoRa gateway</div>
+          <div class="io"><button class="b1" id="b1" title="Nút B1 (PC13): đổi chế độ OFF → MANUAL → AUTO">B1</button>Nút người dùng</div>
+        </div>
+        <div class="state"><span class="pill" id="pill">AUTO</span><span id="faults"></span></div>
+      </div>
+      <div class="readouts">
+        <div class="ro t"><div class="k">Nhiệt độ đo</div><div class="v" id="r-t">--<small>°C</small></div></div>
+        <div class="ro sp"><div class="k">Setpoint</div><div class="v" id="r-sp">--<small>°C</small></div></div>
+        <div class="ro d"><div class="k">Ngõ ra PWM</div><div class="v" id="r-d">--<small>%</small></div></div>
+        <div class="ro"><div class="k">Tốc độ quạt</div><div class="v" id="r-rpm">--<small>rpm</small></div></div>
+        <div class="ro"><div class="k">DAC 0-10 V</div><div class="v" id="r-v">--<small>V</small></div></div>
+        <div class="ro"><div class="k">Bản ghi log</div><div class="v" id="r-log">--<small id="r-unsent"></small></div></div>
+      </div>
+    </section>
+
+    <section class="panel ctl" aria-label="Môi trường và lỗi">
+      <h2>Môi trường và giả lập lỗi</h2>
+      <div class="slider">
+        <label for="s-heat">Nhiệt máy toả ra</label><output id="o-heat">30 %</output>
+        <input type="range" id="s-heat" min="0" max="100" value="30">
+        <span class="hint">100 % khi quạt dừng làm nóng thêm 40 °C so với phòng. Quạt chạy hết cỡ giảm mức này còn 1/5.</span>
+      </div>
+      <div class="slider">
+        <label for="s-amb">Nhiệt độ phòng</label><output id="o-amb">28 °C</output>
+        <input type="range" id="s-amb" min="10" max="45" value="28">
+      </div>
+      <div class="slider">
+        <label for="s-pot">Biến trở (PA1, ADC)</label><output id="o-pot">50 %</output>
+        <input type="range" id="s-pot" min="0" max="100" value="50">
+        <span class="hint">Dùng ở chế độ MANUAL khi bật "use knob".</span>
+      </div>
+      <div class="toggles">
+        <label class="tg"><input type="checkbox" id="f-jam" data-id="3"> Kẹt cánh quạt</label>
+        <label class="tg"><input type="checkbox" id="f-sht" data-id="4"> Rút dây SHT31</label>
+        <label class="tg"><input type="checkbox" id="f-oled" data-id="5"> Rút OLED</label>
+        <label class="tg"><input type="checkbox" id="f-flash" data-id="6"> Tháo W25Q64 (cần reset)</label>
+        <label class="tg ok"><input type="checkbox" id="f-gw" data-id="7" checked> Gateway LoRa online</label>
+      </div>
+      <div>
+        <h2 style="margin-top:4px">Kịch bản nhanh</h2>
+        <div class="scen">
+          <button data-scen="overload">Quá tải nhiệt</button>
+          <button data-scen="stall">Quạt kẹt</button>
+          <button data-scen="sensor">Mất cảm biến</button>
+          <button data-scen="offline">Mất sóng LoRa</button>
+          <button data-scen="normal">Về bình thường</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel" aria-label="Đồ thị">
+    <div class="chart-head">
+      <h2>Đáp ứng vòng điều khiển, 5 phút gần nhất</h2>
+      <div class="legend">
+        <span><i style="background:var(--heat)"></i>Nhiệt độ thật</span>
+        <span><i style="background:var(--heat);opacity:.45"></i>MCU đo (SHT31)</span>
+        <span><i style="background:var(--accent)"></i>Setpoint</span>
+        <span><i style="background:var(--cool)"></i>Duty %</span>
+        <span><i style="background:var(--muted)"></i>rpm / 30</span>
+      </div>
+    </div>
+    <canvas id="chart" aria-label="Đồ thị nhiệt độ, setpoint, duty và tốc độ quạt"></canvas>
+  </section>
+
+  <section class="panel" aria-label="Các cổng UART">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="console">Console CLI<span class="port">USART2 115200</span></button>
+      <button role="tab" aria-selected="false" data-tab="modbus">Modbus RTU<span class="port">USART1 RS485 9600</span></button>
+      <button role="tab" aria-selected="false" data-tab="lora">LoRa<span class="port">USART3 9600</span></button>
+    </div>
+
+    <div data-pane="console">
+      <pre class="term" id="con" aria-live="off"></pre>
+      <form class="inrow" id="con-form">
+        <input type="text" id="con-in" placeholder="gõ lệnh, ví dụ: status" autocomplete="off" spellcheck="false" aria-label="Lệnh console">
+        <button class="primary">Gửi</button>
+      </form>
+      <div class="quick">
+        <button data-cmd="help">help</button><button data-cmd="status">status</button>
+        <button data-cmd="mode manual">mode manual</button><button data-cmd="mode auto">mode auto</button>
+        <button data-cmd="duty 70">duty 70</button><button data-cmd="setpoint 32">setpoint 32</button>
+        <button data-cmd="pid">pid</button><button data-cmd="log dump 5">log dump 5</button>
+        <button data-cmd="i2c">i2c</button><button data-cmd="flash">flash</button>
+        <button data-cmd="fault">fault</button><button data-cmd="stats">stats</button><button data-cmd="cfg">cfg</button>
+      </div>
+    </div>
+
+    <div data-pane="modbus" hidden>
+      <form class="mbgrid" id="mb-form">
+        <label>Slave<input type="number" id="mb-slave" value="1" min="0" max="247"></label>
+        <label>Function
+          <select id="mb-fc">
+            <option value="4">04 Read Input Registers</option>
+            <option value="3">03 Read Holding Registers</option>
+            <option value="6">06 Write Single Register</option>
+            <option value="16">16 Write Multiple Registers</option>
+          </select></label>
+        <label>Địa chỉ bắt đầu<input type="number" id="mb-addr" value="0" min="0" max="65535"></label>
+        <label id="mb-qty-l">Số thanh ghi<input type="number" id="mb-qty" value="12" min="1" max="125"></label>
+        <label id="mb-val-l" hidden>Giá trị (cách nhau dấu phẩy)<input type="text" id="mb-val" value="1"></label>
+        <button class="primary">Gửi khung</button>
+      </form>
+      <div class="quick">
+        <button data-mb="4,0,12">Đọc toàn bộ input</button>
+        <button data-mb="3,0,15">Đọc holding 0-14</button>
+        <button data-mb="6,0,1">Chế độ MANUAL</button>
+        <button data-mb="6,0,2">Chế độ AUTO</button>
+        <button data-mb="6,2,3300">Setpoint 33.00 °C</button>
+        <button data-mb="6,20,2">Xoá lỗi (reg 20 = 2)</button>
+        <button data-mb="16,3,800,40,0">PID 8.00 / 0.40 / 0</button>
+        <button data-mb="6,1,9999">Giá trị sai → exception</button>
+      </div>
+      <div class="hexlbl">Master gửi (có CRC16 Modbus)</div>
+      <div class="hex" id="mb-req">-</div>
+      <div class="hexlbl">Slave trả lời</div>
+      <div class="hex" id="mb-resp">-</div>
+      <div class="tblwrap"><table id="mb-table"></table></div>
+      <form class="inrow" id="mb-raw">
+        <input type="text" id="mb-raw-in" placeholder="hoặc nhập khung hex thô, ví dụ 01 04 00 00 00 02 (CRC tự thêm)" spellcheck="false" aria-label="Khung hex thô">
+        <label class="tg" style="padding:4px 8px"><input type="checkbox" id="mb-badcrc"> làm hỏng CRC</label>
+        <button>Gửi hex</button>
+      </form>
+    </div>
+
+    <div data-pane="lora" hidden>
+      <pre class="term" id="air" aria-live="off"></pre>
+      <form class="inrow" id="lora-form">
+        <select id="lora-cmd" aria-label="Lệnh">
+          <option value="mode">mode (0 OFF, 1 MANUAL, 2 AUTO)</option>
+          <option value="setpoint">setpoint (x0.01 °C)</option>
+          <option value="duty">duty (x0.1 %)</option>
+        </select>
+        <input type="number" id="lora-val" value="1" aria-label="Giá trị" style="width:110px">
+        <button class="primary">Gửi $CMD từ gateway</button>
+      </form>
+      <p class="note">Node gửi <code>$FAN,node,seq,unix,temp,hum,rpm,duty,state,faults*CS</code> lấy từ log trên W25Q64 và chỉ đánh dấu "đã gửi" khi nhận <code>$ACK</code>. Tắt "Gateway LoRa online" để thấy dữ liệu dồn lại trong flash rồi được gửi bù khi có sóng lại.</p>
+    </div>
+  </section>
+
+  <footer>
+    Phần chạy trong trang là mã nguồn firmware ở <code>src/app</code>, <code>src/middleware</code> và <code>src/drivers</code>, biên dịch bằng <code>tools/simulator/build_sim.sh</code>. Các chip W25Q64, SHT31, SSD1306 được giả lập ở mức byte trên bus SPI/I2C, nên driver thật chạy nguyên vẹn. Phần RTOS và HAL được thay bằng một vòng lặp 100 ms gọi các bước giống các task trên chip. Mô hình nhiệt là mô hình bậc một đơn giản, không phải số liệu đo.
+  </footer>
+</div>
+
+<script src="fan_sim_core.js"></script>
+<script>
+(function () {
+  "use strict";
+  var E = window.FanSimCore;
+  var $ = function (id) { return document.getElementById(id); };
+  var STATES = ["OFF", "MANUAL", "AUTO", "FAULT"];
+  var FAULTS = ["FAN_STALL", "SENSOR", "OVER_TEMP", "STORAGE"];
+  var enc = new TextEncoder(), dec = new TextDecoder();
+  function mem() { return new Uint8Array(E.memory.buffer); }
+  function readStr(p) { var m = mem(), q = p; while (m[q]) q++; return dec.decode(m.subarray(p, q)); }
+  function writeStr(p, s) { var b = enc.encode(s.slice(0, 90)), m = mem(); m.set(b, p); m[p + b.length] = 0; }
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  E._initialize();
+  E.sim_init(Math.floor(Date.now() / 1000));
+
+  var running = true, speed = 1, hist = [], lastSec = -1;
+  var conEl = $("con"), airEl = $("air");
+
+  function esc(s) { return s.replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+  function appendTerm(el, text, kind) {
+    if (!text) return;
+    var atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    var html = esc(text.replace(/\r/g, ""));
+    if (kind === "air") {
+      html = html.replace(/^-&gt; (.*)$/gm, '<span class="tx">→ $1</span>').replace(/^&lt;- (.*)$/gm, '<span class="rx">← $1</span>');
+    } else {
+      html = html.replace(/^(\[[^\]]*\] (?:CTRL|FAULT|LINK|SENS|OLED|FLASH|SYS|CFG).*)$/gm, '<span class="ev">$1</span>');
+    }
+    el.insertAdjacentHTML("beforeend", html);
+    if (el.textContent.length > 60000) el.innerHTML = el.innerHTML.slice(-40000);
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  }
+  function drain() {
+    appendTerm(conEl, readStr(E.sim_console_out()), "con");
+    appendTerm(airEl, readStr(E.sim_air_out()), "air");
+    E.sim_outputs_clear();
+  }
+
+  /* ---------- OLED: GDDRAM is 8 pages x 128 columns, bit 0 = top row of the page ---------- */
+  var octx = $("oled").getContext("2d"), oimg = octx.createImageData(128, 64);
+  function drawOled() {
+    var on = E.sim_get(17) > 0, p = E.sim_oled(), m = mem(), d = oimg.data;
+    var px = [127, 215, 255], bg = [5, 11, 16];
+    for (var y = 0; y < 64; y++) for (var x = 0; x < 128; x++) {
+      var lit = on && (m[p + (y >> 3) * 128 + x] >> (y & 7)) & 1, i = (y * 128 + x) * 4, c = lit ? px : bg;
+      d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = 255;
+    }
+    octx.putImageData(oimg, 0, 0);
+  }
+
+  /* ---------- readouts ---------- */
+  function setV(id, txt, unit) { $(id).innerHTML = txt + (unit ? "<small>" + unit + "</small>" : ""); }
+  function updateUi() {
+    var st = STATES[E.sim_get(5)] || "?", fb = E.sim_get(6), meas = E.sim_get(1);
+    var pill = $("pill"); pill.textContent = st; pill.className = "pill " + st;
+    var chips = "";
+    for (var i = 0; i < 4; i++) if (fb & (1 << i)) chips += '<span class="fault-chip">' + FAULTS[i] + "</span> ";
+    $("faults").innerHTML = chips;
+    setV("r-t", meas < -900 ? "--" : meas.toFixed(1), "°C");
+    setV("r-sp", E.sim_get(2).toFixed(1), "°C");
+    setV("r-d", E.sim_get(3).toFixed(1), "%");
+    setV("r-rpm", Math.round(E.sim_get(4)), "rpm");
+    setV("r-v", E.sim_get(13).toFixed(2), "V");
+    var unsent = E.sim_get(16);
+    setV("r-log", Math.round(E.sim_get(8)), unsent > 0 ? Math.round(unsent) + " chưa gửi" : "");
+    $("ld4").classList.toggle("on", E.sim_get(12) > 0);
+    $("relay").classList.toggle("on", E.sim_get(11) > 0);
+    $("ldflash").classList.toggle("on", !$("f-flash").checked);
+    $("ldsht").classList.toggle("on", meas > -900);
+    $("ldlora").classList.toggle("on", $("f-gw").checked);
+    var t = E.sim_get(9);
+    $("clock").textContent = Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0");
+  }
+
+  /* ---------- trend chart ---------- */
+  var cv = $("chart"), cx = cv.getContext("2d");
+  function sample() {
+    var t = E.sim_get(9);
+    if (t === lastSec) return;
+    lastSec = t;
+    hist.push({ t: t, T: E.sim_get(0), M: E.sim_get(1), S: E.sim_get(2), D: E.sim_get(3), R: E.sim_get(4) });
+    if (hist.length > 1200) hist.splice(0, hist.length - 1200);
+  }
+  function drawChart() {
+    var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx.clearRect(0, 0, w, h);
+    var L = 40, R = w - 38, T = 10, B = h - 24, now = hist.length ? hist[hist.length - 1].t : 0, win = 300;
+    var pts = hist.filter(function (p) { return p.t >= now - win; });
+    var lo = 1e9, hi = -1e9;
+    pts.forEach(function (p) { [p.T, p.S, p.M > -900 ? p.M : p.T].forEach(function (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); }); });
+    if (!pts.length) { lo = 20; hi = 40; }
+    lo = Math.floor(lo - 1); hi = Math.ceil(hi + 1);
+    if (hi - lo < 6) { var mid = (hi + lo) / 2; lo = Math.floor(mid - 3); hi = lo + 6; }
+    var xs = function (t) { return L + (R - L) * (t - (now - win)) / win; };
+    var yT = function (v) { return B - (B - T) * (v - lo) / (hi - lo); };
+    var yP = function (v) { return B - (B - T) * v / 100; };
+    cx.font = "11px " + css("--f-mono"); cx.lineWidth = 1;
+    var muted = css("--muted"), line = css("--line");
+    cx.strokeStyle = line; cx.fillStyle = muted;
+    var step = (hi - lo) > 20 ? 5 : (hi - lo) > 10 ? 2 : 1;
+    cx.textAlign = "right"; cx.textBaseline = "middle";
+    for (var v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      var y = yT(v); cx.globalAlpha = .6; cx.beginPath(); cx.moveTo(L, y); cx.lineTo(R, y); cx.stroke(); cx.globalAlpha = 1;
+      cx.fillText(v + "°", L - 5, y);
+    }
+    cx.textAlign = "left";
+    for (var pc = 0; pc <= 100; pc += 25) cx.fillText(pc + "%", R + 5, yP(pc));
+    cx.textAlign = "center"; cx.textBaseline = "top";
+    for (var s = 0; s <= win; s += 60) cx.fillText(s === win ? "bây giờ" : "-" + (win - s) / 60 + " ph", xs(now - win + s), B + 6);
+    function plot(get, color, width, alpha, dash) {
+      cx.strokeStyle = color; cx.lineWidth = width; cx.globalAlpha = alpha; cx.setLineDash(dash || []);
+      cx.beginPath(); var pen = false;
+      pts.forEach(function (p) { var y = get(p); if (y === null) { pen = false; return; }
+        if (pen) cx.lineTo(xs(p.t), y); else { cx.moveTo(xs(p.t), y); pen = true; } });
+      cx.stroke(); cx.globalAlpha = 1; cx.setLineDash([]);
+    }
+    plot(function (p) { return yP(Math.min(100, p.R / 30)); }, muted, 1.2, .8);
+    plot(function (p) { return yP(p.D); }, css("--cool"), 2, 1);
+    plot(function (p) { return yT(p.S); }, css("--accent"), 1.5, 1, [6, 4]);
+    plot(function (p) { return p.M > -900 ? yT(p.M) : null; }, css("--heat"), 4, .3);
+    plot(function (p) { return yT(p.T); }, css("--heat"), 2, 1);
+    var last = pts[pts.length - 1];
+    if (last) { cx.fillStyle = css("--heat"); cx.beginPath(); cx.arc(xs(last.t), yT(last.T), 3.5, 0, 7); cx.fill(); }
+  }
+
+  /* ---------- main loop: 100 ms of real time = speed x 100 ms simulated ---------- */
+  function tick() {
+    if (running) { for (var i = 0; i < speed; i++) { E.sim_run(1); sample(); } }
+    drain(); updateUi(); drawOled();
+  }
+  setInterval(tick, 100);
+  (function frame() { drawChart(); requestAnimationFrame(frame); })();
+  window.addEventListener("resize", drawChart);
+
+  /* ---------- controls ---------- */
+  $("run").onclick = function () {
+    running = !running; this.textContent = running ? "Tạm dừng" : "Chạy tiếp";
+    this.setAttribute("aria-pressed", running); this.classList.toggle("primary", running);
+  };
+  document.querySelectorAll("[data-speed]").forEach(function (b) {
+    b.onclick = function () {
+      speed = +b.dataset.speed;
+      document.querySelectorAll("[data-speed]").forEach(function (o) { o.setAttribute("aria-pressed", o === b); });
+    };
+  });
+  $("reset").onclick = function () { E.sim_reset(); drain(); };
+  $("power").onclick = function () {
+    E.sim_init(Math.floor(Date.now() / 1000)); hist = []; lastSec = -1; conEl.textContent = ""; airEl.textContent = "";
+    applyPlant(); drain();
+  };
+  $("b1").onclick = function () { E.sim_button(); };
+  function bindSlider(id, out, unit, simId) {
+    var s = $(id);
+    s.oninput = function () { $(out).textContent = s.value + " " + unit; E.sim_set(simId, +s.value); };
+  }
+  bindSlider("s-heat", "o-heat", "%", 1); bindSlider("s-amb", "o-amb", "°C", 0); bindSlider("s-pot", "o-pot", "%", 2);
+  document.querySelectorAll(".tg input[data-id]").forEach(function (c) {
+    c.onchange = function () { E.sim_set(+c.dataset.id, c.checked ? 1 : 0); };
+  });
+  function applyPlant() {
+    E.sim_set(1, +$("s-heat").value); E.sim_set(0, +$("s-amb").value); E.sim_set(2, +$("s-pot").value);
+    document.querySelectorAll(".tg input[data-id]").forEach(function (c) { E.sim_set(+c.dataset.id, c.checked ? 1 : 0); });
+  }
+  function setSlider(id, v) { var s = $(id); s.value = v; s.oninput(); }
+  function setBox(id, v) { var c = $(id); c.checked = v; c.onchange(); }
+  document.querySelectorAll("[data-scen]").forEach(function (b) {
+    b.onclick = function () {
+      var k = b.dataset.scen;
+      if (k === "normal") { setSlider("s-heat", 30); setSlider("s-amb", 28); ["f-jam", "f-sht", "f-oled"].forEach(function (i) { setBox(i, false); }); setBox("f-gw", true); runCli("fault"); }
+      if (k === "overload") { setSlider("s-heat", 100); setSlider("s-amb", 40); }
+      if (k === "stall") setBox("f-jam", true);
+      if (k === "sensor") setBox("f-sht", true);
+      if (k === "offline") setBox("f-gw", false);
+      if (speed < 5) document.querySelector('[data-speed="5"]').click();
+    };
+  });
+
+  /* ---------- tabs ---------- */
+  document.querySelectorAll("[data-tab]").forEach(function (t) {
+    t.onclick = function () {
+      document.querySelectorAll("[data-tab]").forEach(function (o) { o.setAttribute("aria-selected", o === t); });
+      document.querySelectorAll("[data-pane]").forEach(function (p) { p.hidden = p.dataset.pane !== t.dataset.tab; });
+    };
+  });
+
+  /* ---------- console ---------- */
+  function runCli(line) { writeStr(E.sim_cli_buf(), line); E.sim_cli(); drain(); conEl.scrollTop = conEl.scrollHeight; }
+  $("con-form").onsubmit = function (e) { e.preventDefault(); var v = $("con-in").value.trim(); if (v) runCli(v); $("con-in").value = ""; };
+  document.querySelectorAll("[data-cmd]").forEach(function (b) { b.onclick = function () { runCli(b.dataset.cmd); }; });
+
+  /* ---------- Modbus master ---------- */
+  function crc16(b) { var c = 0xFFFF; for (var i = 0; i < b.length; i++) { c ^= b[i]; for (var k = 0; k < 8; k++) c = (c & 1) ? (c >>> 1) ^ 0xA001 : c >>> 1; } return c; }
+  function hex(b) { return Array.prototype.map.call(b, function (x) { return x.toString(16).toUpperCase().padStart(2, "0"); }).join(" "); }
+  var IN_NAMES = ["Nhiệt độ (0.01 °C)", "Độ ẩm (0.01 %RH)", "Tốc độ (rpm)", "Duty (0.1 %)", "Trạng thái", "Bit lỗi",
+    "Biến trở (0.1 %)", "Uptime (s) cao", "Uptime (s) thấp", "Số bản ghi cao", "Số bản ghi thấp", "Phiên bản FW"];
+  var HOLD_NAMES = ["Lệnh chế độ", "Duty tay (0.1 %)", "Setpoint (0.01 °C)", "Kp x100", "Ki x100", "Kd x100", "Duty tối thiểu",
+    "Duty khi lỗi", "Ngưỡng quá nhiệt", "Tốc độ ramp (0.1 %/s)", "Chu kỳ log (s)", "Chu kỳ telemetry (s)", "Địa chỉ Modbus",
+    "Dùng biến trở", "Ngưỡng kẹt (rpm)"];
+  var EXC = { 1: "ILLEGAL FUNCTION", 2: "ILLEGAL DATA ADDRESS", 3: "ILLEGAL DATA VALUE", 4: "DEVICE FAILURE" };
+  function sendFrame(body, corrupt) {
+    var c = crc16(body), f = body.concat([c & 0xFF, c >> 8]);
+    if (corrupt) f[f.length - 1] ^= 0x5A;
+    $("mb-req").textContent = hex(f);
+    mem().set(f, E.sim_mb_req_buf());
+    var n = E.sim_modbus(f.length), tbl = $("mb-table");
+    tbl.innerHTML = "";
+    if (n <= 0) { $("mb-resp").innerHTML = '<span class="err">không trả lời (sai CRC, sai địa chỉ slave hoặc broadcast)</span>'; drain(); return; }
+    var r = Array.from(mem().subarray(E.sim_mb_resp_buf(), E.sim_mb_resp_buf() + n));
+    $("mb-resp").textContent = hex(r);
+    if (r[1] & 0x80) { tbl.innerHTML = '<tr><td class="err">Exception ' + r[2] + ": " + (EXC[r[2]] || "?") + "</td></tr>"; drain(); return; }
+    if (r[1] === 3 || r[1] === 4) {
+      var names = r[1] === 4 ? IN_NAMES : HOLD_NAMES, start = (body[2] << 8) | body[3], rows = "<tr><th>Reg</th><th>Ý nghĩa</th><th>Hex</th><th>Giá trị</th></tr>";
+      for (var i = 0; i < r[2] / 2; i++) {
+        var v = (r[3 + 2 * i] << 8) | r[4 + 2 * i], a = start + i, shown = v;
+        if (r[1] === 4 && a === 0) shown = v === 0x8000 ? "không có cảm biến" : ((v << 16 >> 16) / 100).toFixed(2) + " °C";
+        if (a === 4 && r[1] === 4 || a === 0 && r[1] === 3) shown = v + " (" + (STATES[v] || "?") + ")";
+        rows += "<tr><td class=num>" + a + "</td><td>" + (names[a] || "") + "</td><td class=num>0x" + v.toString(16).toUpperCase().padStart(4, "0") + "</td><td class=num>" + shown + "</td></tr>";
+      }
+      tbl.innerHTML = rows;
+    } else {
+      tbl.innerHTML = "<tr><td>Ghi thành công (slave lặp lại địa chỉ và số lượng/giá trị).</td></tr>";
+    }
+    drain();
+  }
+  function buildMb(fc, addr, vals) {
+    var s = +$("mb-slave").value & 0xFF, b = [s, fc, addr >> 8, addr & 0xFF];
+    if (fc === 3 || fc === 4) b.push(vals[0] >> 8, vals[0] & 0xFF);
+    else if (fc === 6) b.push((vals[0] >> 8) & 0xFF, vals[0] & 0xFF);
+    else { b.push(0, vals.length, vals.length * 2); vals.forEach(function (v) { b.push((v >> 8) & 0xFF, v & 0xFF); }); }
+    return b;
+  }
+  $("mb-fc").onchange = function () {
+    var fc = +this.value; $("mb-qty-l").hidden = fc === 6 || fc === 16; $("mb-val-l").hidden = !($("mb-qty-l").hidden);
+  };
+  $("mb-form").onsubmit = function (e) {
+    e.preventDefault();
+    var fc = +$("mb-fc").value, addr = +$("mb-addr").value;
+    var vals = (fc === 3 || fc === 4) ? [+$("mb-qty").value] : $("mb-val").value.split(",").map(function (x) { return +x.trim() & 0xFFFF; });
+    sendFrame(buildMb(fc, addr, vals));
+  };
+  document.querySelectorAll("[data-mb]").forEach(function (b) {
+    b.onclick = function () {
+      var p = b.dataset.mb.split(",").map(Number), fc = p[0];
+      $("mb-fc").value = fc; $("mb-fc").onchange(); $("mb-addr").value = p[1];
+      if (fc === 3 || fc === 4) $("mb-qty").value = p[2]; else $("mb-val").value = p.slice(2).join(",");
+      sendFrame(buildMb(fc, p[1], p.slice(2)));
+    };
+  });
+  $("mb-raw").onsubmit = function (e) {
+    e.preventDefault();
+    var bytes = $("mb-raw-in").value.trim().split(/[\s,]+/).filter(Boolean).map(function (x) { return parseInt(x, 16) & 0xFF; });
+    if (bytes.length >= 2) sendFrame(bytes, $("mb-badcrc").checked);
+  };
+
+  /* ---------- LoRa gateway ---------- */
+  $("lora-form").onsubmit = function (e) {
+    e.preventDefault();
+    var body = "CMD,1," + $("lora-cmd").value + "," + Math.round(+$("lora-val").value), cs = 0;
+    for (var i = 0; i < body.length; i++) cs ^= body.charCodeAt(i);
+    writeStr(E.sim_cli_buf(), "$" + body + "*" + cs.toString(16).toUpperCase().padStart(2, "0"));
+    E.sim_lora_send(); drain(); airEl.scrollTop = airEl.scrollHeight;
+  };
+  $("lora-cmd").onchange = function () { $("lora-val").value = { mode: 1, setpoint: 3200, duty: 600 }[this.value]; };
+
+  /* ---------- first frame: a few seconds already run so the page shows a working board ---------- */
+  applyPlant();
+  for (var i = 0; i < 80; i++) { E.sim_run(1); sample(); }
+  runCli("status");
+  tick();
+})();
+</script>
