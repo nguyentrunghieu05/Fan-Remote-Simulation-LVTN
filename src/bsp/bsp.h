@@ -75,5 +75,9 @@ void     bsp_rtc_set_unix(uint32_t t);
 bool     bsp_rtc_is_set(void);
 void     bsp_iwdg_init(uint32_t timeout_ms);
 void     bsp_iwdg_refresh(void);
+/** Resets caused by the IWDG, counted in an RTC backup register (kept over
+ *  resets, lost when the backup domain loses power). */
+uint32_t bsp_wdt_reset_count(void);
+void     bsp_wdt_reset_count_clear(void);
 
 #endif /* BSP_H */

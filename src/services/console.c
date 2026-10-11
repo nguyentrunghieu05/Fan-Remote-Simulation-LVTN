@@ -350,6 +350,35 @@ static int cmd_stats(cli_t *c, int argc, char *argv[])
     return 0;
 }
 
+static int cmd_wdt(cli_t *c, int argc, char *argv[])
+{
+    if (argc == 2 && strcmp(argv[1], "test") == 0) {
+        /* Demo: this task stops kicking. The supervisor sees the missed
+         * deadline, stops feeding the IWDG, and the IWDG resets the MCU. */
+        sv_info_t me = { 0 };
+        (void)sv_info(s_sv, &me);
+        cli_printf(c, "console task hangs now: supervisor reports it after %lu ms, IWDG resets %lu ms later\r\n",
+                   (unsigned long)me.timeout_ms, (unsigned long)sv_iwdg_timeout_ms());
+        vTaskDelay(pdMS_TO_TICKS(50));          /* let the text leave the UART */
+        for (;;) { }
+    }
+    if (argc == 2 && strcmp(argv[1], "clear") == 0) {
+        bsp_wdt_reset_count_clear();
+    } else if (argc != 1) {
+        cli_printf(c, "usage: wdt | wdt test | wdt clear\r\n");
+        return 1;
+    }
+    cli_printf(c, "IWDG %lu ms   watchdog resets %lu   last reset %s\r\n", (unsigned long)sv_iwdg_timeout_ms(),
+               (unsigned long)bsp_wdt_reset_count(), bsp_reset_cause());
+    cli_printf(c, "task       deadline   last kick  state\r\n");
+    sv_info_t s;
+    for (int i = 0; sv_info(i, &s); i++) {
+        cli_printf(c, "%-10s %6lu ms %8lu ms  %s\r\n", s.name, (unsigned long)s.timeout_ms,
+                   (unsigned long)s.age_ms, s.age_ms > s.timeout_ms ? "LATE" : "ok");
+    }
+    return 0;
+}
+
 static int cmd_reboot(cli_t *c, int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -374,6 +403,7 @@ static const cli_cmd_t s_cmds[] = {
     { "fault",    "clear latched faults",                   cmd_fault },
     { "tasks",    "RTOS tasks, stack and CPU usage",        cmd_tasks },
     { "stats",    "Modbus / LoRa / CAN counters",           cmd_stats },
+    { "wdt",      "watchdog status | test | clear",         cmd_wdt },
     { "reboot",   "software reset",                         cmd_reboot },
 };
 
