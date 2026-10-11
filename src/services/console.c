@@ -64,8 +64,12 @@ static int cmd_status(cli_t *c, int argc, char *argv[])
     sys_snapshot(&d);
     cli_printf(c, "state     %s\r\n", app_state_name(d.m.state));
     if (d.m.temp_valid) {
-        cli_printf(c, "temp      %s C   hum %s %%\r\n", fmt_fixed(a, (int32_t)(d.m.temp_c * 100.0f), 2),
+        cli_printf(c, "temp      %s C   hum %s %%", fmt_fixed(a, (int32_t)(d.m.temp_c * 100.0f), 2),
                    fmt_fixed(b, (int32_t)(d.m.hum_pct * 10.0f), 1));
+        if (d.m.press_hpa > 0.0f) {
+            cli_printf(c, "   press %s hPa", fmt_fixed(a, (int32_t)(d.m.press_hpa * 10.0f), 1));
+        }
+        cli_printf(c, "   (%s)\r\n", d.m.sensor_name);
     } else {
         cli_printf(c, "temp      no sensor (%lu errors)\r\n", (unsigned long)d.m.sensor_errors);
     }
@@ -78,8 +82,8 @@ static int cmd_status(cli_t *c, int argc, char *argv[])
             cli_printf(c, " %s", fault_name((fault_id_t)i));
         }
     }
-    cli_printf(c, "\r\nflash     %s   oled %s   uptime %lu s\r\n", d.m.flash_ok ? "ok" : "missing",
-               d.m.oled_ok ? "ok" : "missing", (unsigned long)(bsp_millis() / 1000U));
+    cli_printf(c, "\r\nflash     %s   display %s   uptime %lu s\r\n", d.m.flash_ok ? "ok" : "missing",
+               d.m.display_name, (unsigned long)(bsp_millis() / 1000U));
     return 0;
 }
 
@@ -233,13 +237,30 @@ static int cmd_flash(cli_t *c, int argc, char *argv[])
     return 0;
 }
 
+/* What usually sits at this address (a scan cannot know for sure). */
+static const char *i2c_guess(uint8_t a)
+{
+    switch (a) {
+    case 0x20: case 0x21: case 0x22: case 0x23:
+    case 0x24: case 0x25: case 0x26: case 0x27:
+    case 0x39: case 0x3A: case 0x3B:
+    case 0x3E: case 0x3F:          return "PCF8574 (LCD backpack)";
+    case 0x29:                     return "VL53L0X";
+    case 0x38:                     return "AHT10/AHT20";
+    case 0x3C: case 0x3D:          return "SSD1306 OLED";
+    case 0x44: case 0x45:          return "SHT3x";
+    case 0x76: case 0x77:          return "BME280/BMP280";
+    default:                       return "";
+    }
+}
+
 static int cmd_i2c(cli_t *c, int argc, char *argv[])
 {
     (void)argc; (void)argv;
     int found = 0;
     for (uint8_t a = 0x08; a < 0x78; a++) {
         if (bsp_i2c_probe(a)) {
-            cli_printf(c, "  0x%02X%s\r\n", a, a == 0x44 ? "  SHT3x" : a == 0x3C ? "  SSD1306" : "");
+            cli_printf(c, "  0x%02X  %s\r\n", a, i2c_guess(a));
             found++;
         }
     }
