@@ -11,6 +11,7 @@
 #include "modbus_server.h"
 #include "radio_link.h"
 #include "can_link.h"
+#include "power.h"
 #include "supervisor.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -85,6 +86,30 @@ static int cmd_status(cli_t *c, int argc, char *argv[])
     }
     cli_printf(c, "\r\nflash     %s   display %s   uptime %lu s\r\n", d.m.flash_ok ? "ok" : "missing",
                d.m.display_name, (unsigned long)(bsp_millis() / 1000U));
+    power_status_t p;
+    power_get(&p);
+    if (p.vdd_low || p.vbus_low) {
+        cli_printf(c, "power     LOW%s%s (see 'power')\r\n", p.vdd_low ? " VDD" : "", p.vbus_low ? " 12V" : "");
+    }
+    return 0;
+}
+
+static int cmd_power(cli_t *c, int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    power_status_t p;
+    char a[16], b[16];
+    power_get(&p);
+    cli_printf(c, "VDD   %s V   min %s V   %s\r\n", fmt_fixed(a, p.vdd_mv / 10, 2),
+               fmt_fixed(b, p.vdd_min_mv / 10, 2), p.vdd_low ? "LOW (< 3.00 V)" : "ok");
+    if (p.vbus_present) {
+        cli_printf(c, "12V   %s V   min %s V   %s\r\n", fmt_fixed(a, (int32_t)(p.vbus_mv / 10U), 2),
+                   fmt_fixed(b, (int32_t)(p.vbus_min_mv / 10U), 2), p.vbus_low ? "LOW (< 10.80 V)" : "ok");
+    } else {
+        cli_printf(c, "12V   not connected (%s V on the divider input)\r\n",
+                   fmt_fixed(a, (int32_t)(p.vbus_mv / 10U), 2));
+    }
+    cli_printf(c, "sags  %lu since boot\r\n", (unsigned long)p.sags);
     return 0;
 }
 
@@ -343,6 +368,7 @@ static const cli_cmd_t s_cmds[] = {
     { "cfg",      "show | set <key> <v> | save | default",  cmd_cfg },
     { "log",      "count | dump [n] (CSV) | clear",         cmd_log },
     { "flash",    "SPI flash info",                         cmd_flash },
+    { "power",    "VDD / 12 V supply and sags",             cmd_power },
     { "i2c",      "scan the I2C bus",                       cmd_i2c },
     { "time",     "show | set <unix>",                      cmd_time },
     { "fault",    "clear latched faults",                   cmd_fault },
