@@ -6,11 +6,17 @@
 #define REG_CALIB_TP  0x88U     /* 26 bytes: T1..P9, (A0 unused), H1 at 0xA1 */
 #define REG_CALIB_H   0xE1U     /* 7 bytes: H2..H6 */
 #define REG_CTRL_HUM  0xF2U
+#define REG_STATUS    0xF3U
 #define REG_CTRL_MEAS 0xF4U
 #define REG_DATA      0xF7U     /* press[3] temp[3] hum[2] */
 
 #define OSRS_X1       1U
 #define MODE_FORCED   1U
+#define STATUS_MEASURING 0x08U  /* status bit 3: conversion running */
+
+#define MEAS_WAIT_MS     10U    /* 1x/1x/1x: max 9.3 ms (datasheet 9.1) */
+#define MEAS_POLL_MS     2U
+#define MEAS_TIMEOUT_MS  50U
 
 static int read_regs(bme280_t *d, uint8_t reg, uint8_t *buf, size_t n)
 {
@@ -127,7 +133,24 @@ int bme280_measure(bme280_t *dev, bme280_sample_t *out)
     if (rc != ERR_OK) {
         return rc;
     }
-    dev->delay_ms(10U);                          /* 1x/1x/1x: max 9.3 ms */
+    /* Wait the maximum conversion time, then make sure the chip is really
+     * done: reading the data registers while status.measuring is set can
+     * return a mix of old and new bytes. */
+    dev->delay_ms(MEAS_WAIT_MS);
+    for (uint32_t waited = MEAS_WAIT_MS; ; waited += MEAS_POLL_MS) {
+        uint8_t st;
+        rc = read_regs(dev, REG_STATUS, &st, 1U);
+        if (rc != ERR_OK) {
+            return rc;
+        }
+        if ((st & STATUS_MEASURING) == 0U) {
+            break;
+        }
+        if (waited >= MEAS_TIMEOUT_MS) {
+            return ERR_TIMEOUT;
+        }
+        dev->delay_ms(MEAS_POLL_MS);
+    }
 
     uint8_t b[8];
     rc = read_regs(dev, REG_DATA, b, dev->has_humidity ? 8U : 6U);

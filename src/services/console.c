@@ -69,7 +69,7 @@ static int cmd_status(cli_t *c, int argc, char *argv[])
         if (d.m.press_hpa > 0.0f) {
             cli_printf(c, "   press %s hPa", fmt_fixed(a, (int32_t)(d.m.press_hpa * 10.0f), 1));
         }
-        cli_printf(c, "   (%s)\r\n", d.m.sensor_name);
+        cli_printf(c, "   (%s, %lu errors)\r\n", d.m.sensor_name, (unsigned long)d.m.sensor_errors);
     } else {
         cli_printf(c, "temp      no sensor (%lu errors)\r\n", (unsigned long)d.m.sensor_errors);
     }

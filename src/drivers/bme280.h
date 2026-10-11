@@ -4,7 +4,8 @@
  *
  * The chip is told apart by its ID register (0xD0): 0x60 = BME280 (has a
  * humidity sensor), 0x58 = BMP280 (no humidity). Measurements use forced
- * mode: write ctrl_meas -> wait ~10 ms -> burst read 0xF7..0xFE. The raw
+ * mode: write ctrl_meas -> wait ~10 ms -> poll status (0xF3) until the
+ * measuring bit clears -> burst read 0xF7..0xFE. The raw
  * values are turned into units with the integer formulas of the Bosch
  * datasheet and the factory calibration read once at init.
  */
@@ -43,7 +44,7 @@ typedef struct {
 
 /** Probe addr, read the ID and the calibration. ERR_NOT_FOUND if absent / unknown ID. */
 int  bme280_init(bme280_t *dev, const i2c_bus_t *bus, uint8_t addr, delay_ms_fn delay_ms);
-/** One forced-mode measurement. */
+/** One forced-mode measurement. ERR_TIMEOUT if status.measuring stays set > 50 ms. */
 int  bme280_measure(bme280_t *dev, bme280_sample_t *out);
 /** Datasheet compensation, exposed for unit tests. adc_h is ignored without humidity. */
 void bme280_compensate(const bme280_t *dev, int32_t adc_t, int32_t adc_p, int32_t adc_h, bme280_sample_t *out);
