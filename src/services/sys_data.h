@@ -19,6 +19,8 @@ typedef struct {
     /* written by the sensor task */
     float       temp_c;
     float       hum_pct;
+    float       press_hpa;     /* 0 when the sensor has no barometer */
+    const char *sensor_name;   /* "SHT3x", "BME280", "BMP280" or "none" */
     bool        temp_valid;
     uint16_t    rpm;
     float       pot_percent;
@@ -29,7 +31,8 @@ typedef struct {
     uint32_t    faults;
     /* written at boot */
     bool        flash_ok;
-    bool        oled_ok;
+    bool        oled_ok;       /* a display (OLED or LCD) answered */
+    const char *display_name;  /* "SSD1306", "LCD1602" or "none" */
 } sys_meas_t;
 
 typedef struct {
