@@ -15,6 +15,8 @@
  *  SPI flash W25Q64     SPI2         PB13 SCK, PB14 MISO,   CN10-30/28/26
  *                                    PB15 MOSI (AF0)
  *                       GPIO         PB12 CS                CN10-16
+ *  CAN MCP2515          SPI2 (shared with the flash, own chip select)
+ *                       GPIO         PB11 CS                CN10 (morpho)
  *  SHT31 + SSD1306 OLED I2C1         PB8 SCL, PB9 SDA (AF6) D15, D14
  *  Fan PWM 25 kHz       TIM1_CH1     PA8 (AF2)              D7
  *  Fan 0-10 V (via op-amp x3) DAC1_OUT1 PA4                 A2
@@ -79,6 +81,14 @@
 #define FLASH_MOSI_PIN          GPIO_PIN_15
 #define FLASH_CS_PORT           GPIOB
 #define FLASH_CS_PIN            GPIO_PIN_12
+#define FLASH_SPI_PRESCALER     SPI_BAUDRATEPRESCALER_4   /* 64/4 = 16 MHz */
+
+/* ---- CAN controller MCP2515 on the same SPI2 bus ---- */
+#define CAN_CS_PORT             GPIOB
+#define CAN_CS_PIN              GPIO_PIN_11
+#define CAN_SPI_PRESCALER       SPI_BAUDRATEPRESCALER_8   /* 64/8 = 8 MHz, MCP2515 max 10 MHz */
+#define CAN_OSC_HZ              8000000U        /* crystal on the MCP2515 module */
+#define CAN_BITRATE             250000U
 
 /* ---- I2C sensor + display bus ---- */
 #define SENSOR_I2C              I2C1

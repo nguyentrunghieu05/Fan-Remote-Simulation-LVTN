@@ -1,6 +1,6 @@
 /**
  * @file    bsp_bus.c
- * @brief   SPI2 (external flash) and I2C1 (sensor + OLED) buses.
+ * @brief   SPI2 (external flash + MCP2515 CAN controller) and I2C1 (sensor + display) buses.
  *
  * Each bus has a mutex, so two tasks (e.g. the sensor task reading the
  * SHT31 and the display task refreshing the OLED) can share it safely.
@@ -26,16 +26,30 @@ static bool rtos_running(void)
 }
 
 /* ---------------------------------------------------------------- SPI */
+/* One SPI2 bus, one entry per slave: its chip select and its clock. */
+typedef struct {
+    GPIO_TypeDef *cs_port;
+    uint32_t      cs_pin;
+    uint32_t      prescaler;    /* SPI_BAUDRATEPRESCALER_x = CR1.BR bits */
+} spi_dev_t;
+
+static const spi_dev_t s_flash_dev = { FLASH_CS_PORT, FLASH_CS_PIN, FLASH_SPI_PRESCALER };
+static const spi_dev_t s_can_dev   = { CAN_CS_PORT, CAN_CS_PIN, CAN_SPI_PRESCALER };
+
 static void spi_select(void *ctx, bool active)
 {
-    (void)ctx;
+    const spi_dev_t *dev = ctx;
     if (active) {
         if (rtos_running()) {
             xSemaphoreTake(s_spi_lock, portMAX_DELAY);   /* lock for the whole CS window */
         }
-        HAL_GPIO_WritePin(FLASH_CS_PORT, FLASH_CS_PIN, GPIO_PIN_RESET);
+        if ((FLASH_SPI->CR1 & SPI_CR1_BR) != dev->prescaler) {
+            __HAL_SPI_DISABLE(&s_spi);                   /* BR may only change while SPE = 0; */
+            MODIFY_REG(FLASH_SPI->CR1, SPI_CR1_BR, dev->prescaler);   /* HAL re-enables it */
+        }
+        HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
     } else {
-        HAL_GPIO_WritePin(FLASH_CS_PORT, FLASH_CS_PIN, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
         if (rtos_running()) {
             xSemaphoreGive(s_spi_lock);
         }
@@ -77,7 +91,7 @@ void bsp_spi_init(spi_bus_t *bus)
     s_spi.Init.CLKPolarity       = SPI_POLARITY_LOW;    /* SPI mode 0 */
     s_spi.Init.CLKPhase          = SPI_PHASE_1EDGE;
     s_spi.Init.NSS               = SPI_NSS_SOFT;        /* CS is a plain GPIO */
-    s_spi.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;   /* 64/4 = 16 MHz */
+    s_spi.Init.BaudRatePrescaler = FLASH_SPI_PRESCALER;
     s_spi.Init.FirstBit          = SPI_FIRSTBIT_MSB;
     s_spi.Init.TIMode            = SPI_TIMODE_DISABLE;
     s_spi.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
@@ -87,7 +101,14 @@ void bsp_spi_init(spi_bus_t *bus)
     s_spi_lock    = xSemaphoreCreateMutex();
     bus->transfer = spi_transfer;
     bus->select   = spi_select;
-    bus->ctx      = NULL;
+    bus->ctx      = (void *)&s_flash_dev;
+}
+
+void bsp_spi_can_bus(spi_bus_t *bus)
+{
+    bus->transfer = spi_transfer;
+    bus->select   = spi_select;
+    bus->ctx      = (void *)&s_can_dev;
 }
 
 /* ---------------------------------------------------------------- I2C */

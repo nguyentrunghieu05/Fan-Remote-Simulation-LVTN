@@ -49,6 +49,8 @@ uint32_t bsp_uart_errors(bsp_uart_t port);
 
 /* ---- SPI flash bus / I2C sensor bus (thread safe) ---- */
 void bsp_spi_init(spi_bus_t *flash_bus);
+/** Same SPI2 bus, MCP2515 chip select and 8 MHz clock. Call after bsp_spi_init(). */
+void bsp_spi_can_bus(spi_bus_t *can_bus);
 void bsp_i2c_init(i2c_bus_t *sensor_bus);
 /** Free a bus stuck by a slave holding SDA low (9 clock pulses + STOP). */
 void bsp_i2c_recover(void);
