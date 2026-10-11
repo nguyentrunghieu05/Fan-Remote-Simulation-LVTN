@@ -1,0 +1,16 @@
+build/
+tests/unit_tests
+tests/renode/*.log
+tests/renode/logs/
+tests/renode/snapshots/
+tests/renode/robot_output.xml
+tests/renode/log.html
+tests/renode/report.html
+tools/simulator/build/
+.settings/
+Debug/
+Release/
+
+# STM32CubeIDE workspace
+.metadata/
+*.launch
