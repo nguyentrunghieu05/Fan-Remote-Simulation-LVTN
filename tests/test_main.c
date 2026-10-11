@@ -13,6 +13,7 @@ void suite_config_store(void);
 void suite_w25qxx(void);
 void suite_sht3x(void);
 void suite_i2c_devices(void);
+void suite_mcp2515(void);
 void suite_telemetry(void);
 void suite_app(void);
 
@@ -30,6 +31,7 @@ int main(void)
     suite_w25qxx();
     suite_sht3x();
     suite_i2c_devices();
+    suite_mcp2515();
     suite_telemetry();
     suite_app();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
