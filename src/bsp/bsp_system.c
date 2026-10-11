@@ -107,6 +107,7 @@ void bsp_gpio_init(void)
     out_pin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
     out_pin(RELAY_PORT, RELAY_PIN, GPIO_PIN_RESET);
     out_pin(FLASH_CS_PORT, FLASH_CS_PIN, GPIO_PIN_SET);        /* deselected */
+    out_pin(CAN_CS_PORT, CAN_CS_PIN, GPIO_PIN_SET);            /* MCP2515 off the shared MISO */
     out_pin(LORA_M0_PORT, LORA_M0_PIN, GPIO_PIN_RESET);        /* M0=M1=0: transparent */
     out_pin(LORA_M1_PORT, LORA_M1_PIN, GPIO_PIN_RESET);
 
