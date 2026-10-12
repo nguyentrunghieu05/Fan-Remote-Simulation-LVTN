@@ -9,11 +9,14 @@
 #define VDD_OK_MV         3100U
 #define VBUS_LOW_MV       10800U
 #define VBUS_OK_MV        11200U
-#define VBUS_PRESENT_MV   3000U
+/* Presence with hysteresis: a floating divider input reads 2..4 V of noise,
+ * which must never be taken for a 12 V supply. */
+#define VBUS_PRESENT_MV   8000U
+#define VBUS_ABSENT_MV    5000U
 #define CONFIRM_SAMPLES   2U
 
 static power_status_t s_pwr = { .vdd_min_mv = 0xFFFFU, .vbus_min_mv = 0xFFFFFFFFUL };
-static uint8_t        s_vdd_cnt, s_vbus_cnt;
+static uint8_t        s_vdd_cnt, s_vbus_cnt, s_present_cnt;
 
 /* Low/ok decision with hysteresis and confirmation over a few samples. */
 static bool check(bool low_now, bool *flag, uint8_t *cnt, uint32_t mv, uint32_t ok_mv)
@@ -54,16 +57,18 @@ void power_sample(void)
         log_printf("PWR", "VDD %s: %s V", p.vdd_low ? "low" : "back to normal", fmt_fixed(a, vdd / 10, 2));
     }
 
-    bool present = vbus >= VBUS_PRESENT_MV;
-    if (present != p.vbus_present) {
-        log_printf("PWR", "12V supply %s (%s V)", present ? "connected" : "not connected",
-                   fmt_fixed(a, (int32_t)(vbus / 10U), 2));
-        p.vbus_present = present;
+    bool change = p.vbus_present ? (vbus < VBUS_ABSENT_MV) : (vbus > VBUS_PRESENT_MV);
+    s_present_cnt = change ? (uint8_t)(s_present_cnt + 1U) : 0U;
+    if (s_present_cnt >= CONFIRM_SAMPLES) {
+        s_present_cnt  = 0U;
+        p.vbus_present = !p.vbus_present;
         p.vbus_low     = false;
         s_vbus_cnt     = 0U;
+        log_printf("PWR", "12V supply %s (%s V)", p.vbus_present ? "connected" : "not connected",
+                   fmt_fixed(a, (int32_t)(vbus / 10U), 2));
     }
     p.vbus_mv = vbus;
-    if (present) {
+    if (p.vbus_present) {
         if (vbus < p.vbus_min_mv) {
             p.vbus_min_mv = vbus;
         }

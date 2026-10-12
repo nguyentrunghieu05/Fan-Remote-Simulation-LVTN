@@ -7,7 +7,8 @@
  * a higher level (hysteresis), so a noisy supply does not flood the log.
  *
  *   VDD  low < 3.00 V, ok again > 3.10 V
- *   12 V low < 10.8 V (-10 %), ok again > 11.2 V, "not connected" < 3 V
+ *   12 V low < 10.8 V (-10 %), ok again > 11.2 V
+ *   12 V connected > 8 V, not connected < 5 V (a floating input reads 2..4 V)
  */
 #ifndef POWER_H
 #define POWER_H
