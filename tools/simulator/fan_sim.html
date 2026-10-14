@@ -158,6 +158,7 @@ code { font-family: var(--f-mono); font-size: .92em }
           <div class="io"><span class="led g" id="ldflash"></span>W25Q64 (SPI2)</div>
           <div class="io"><span class="led g" id="ldsht"></span>SHT31 (I2C1 0x44)</div>
           <div class="io"><span class="led g" id="ldlora"></span>LoRa gateway</div>
+          <div class="io"><span class="led r" id="ldwdg"></span>IWDG ngừng được nạp</div>
           <div class="io"><button class="b1" id="b1" title="Nút B1 (PC13): đổi chế độ OFF → MANUAL → AUTO">B1</button>Nút người dùng</div>
         </div>
         <div class="state"><span class="pill" id="pill">AUTO</span><span id="faults"></span></div>
@@ -202,6 +203,7 @@ code { font-family: var(--f-mono); font-size: .92em }
           <button data-scen="stall">Quạt kẹt</button>
           <button data-scen="sensor">Mất cảm biến</button>
           <button data-scen="offline">Mất sóng LoRa</button>
+          <button data-scen="hang" title="Tác vụ control kẹt trong vòng lặp vô hạn: supervisor ngừng nạp IWDG, sau 2 s bo bị reset">Treo tác vụ (WDT)</button>
           <button data-scen="normal">Về bình thường</button>
         </div>
       </div>
@@ -242,6 +244,7 @@ code { font-family: var(--f-mono); font-size: .92em }
         <button data-cmd="pid">pid</button><button data-cmd="log dump 5">log dump 5</button>
         <button data-cmd="i2c">i2c</button><button data-cmd="flash">flash</button>
         <button data-cmd="fault">fault</button><button data-cmd="stats">stats</button><button data-cmd="cfg">cfg</button>
+        <button data-cmd="wdt">wdt</button><button data-cmd="wdt test">wdt test</button>
       </div>
     </div>
 
@@ -330,7 +333,7 @@ code { font-family: var(--f-mono); font-size: .92em }
     if (kind === "air") {
       html = html.replace(/^-&gt; (.*)$/gm, '<span class="tx">→ $1</span>').replace(/^&lt;- (.*)$/gm, '<span class="rx">← $1</span>');
     } else {
-      html = html.replace(/^(\[[^\]]*\] (?:CTRL|FAULT|LINK|SENS|OLED|FLASH|SYS|CFG).*)$/gm, '<span class="ev">$1</span>');
+      html = html.replace(/^(\[[^\]]*\] (?:CTRL|FAULT|LINK|SENS|OLED|FLASH|SYS|CFG|WDG).*)$/gm, '<span class="ev">$1</span>');
     }
     el.insertAdjacentHTML("beforeend", html);
     if (el.textContent.length > 60000) el.innerHTML = el.innerHTML.slice(-40000);
@@ -374,6 +377,7 @@ code { font-family: var(--f-mono); font-size: .92em }
     $("ldflash").classList.toggle("on", !$("f-flash").checked);
     $("ldsht").classList.toggle("on", meas > -900);
     $("ldlora").classList.toggle("on", $("f-gw").checked);
+    $("ldwdg").classList.toggle("on", E.sim_get(20) > 0);
     var t = E.sim_get(9);
     $("clock").textContent = Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0");
   }
@@ -479,6 +483,7 @@ code { font-family: var(--f-mono); font-size: .92em }
       if (k === "stall") setBox("f-jam", true);
       if (k === "sensor") setBox("f-sht", true);
       if (k === "offline") setBox("f-gw", false);
+      if (k === "hang") E.sim_set(8, 0);
       if (speed < 5) document.querySelector('[data-speed="5"]').click();
     };
   });
