@@ -4,12 +4,14 @@
  *
  * The firmware's portable layers are compiled UNCHANGED next to this file:
  *   app_fsm, fan_logic, pid, ramp, fault, modbus_slave, crc, telemetry,
- *   datalog, cli, w25qxx, sht3x, ssd1306.
+ *   datalog, cli, w25qxx, sht3x, ssd1306, bme280, lcd1602, mcp2515.
  *
  * What is simulated here instead of the real hardware:
  *   - the room / machine (thermal model) and the fan (speed, inertia, tach)
- *   - the chips on the buses, at the byte level: W25Q64 on SPI, SHT31 and
- *     SSD1306 on I2C - so the real drivers run against them
+ *   - the chips on the buses, at the byte level: W25Q64 and MCP2515 on SPI,
+ *     SHT31, SSD1306, BMP280 and LCD 1602 (PCF8574) on I2C - so the real
+ *     drivers run against them. "Real board" swaps SHT31 + OLED for the
+ *     BMP280 + LCD 1602 used on the bench.
  *   - the RTOS tasks: one 100 ms tick calls the same steps in the same
  *     order as control / sensors / storage / display / link tasks do.
  *
@@ -36,6 +38,9 @@
 #include "w25qxx.h"
 #include "sht3x.h"
 #include "ssd1306.h"
+#include "bme280.h"
+#include "lcd1602.h"
+#include "mcp2515.h"
 
 #ifdef __wasm__
 #define EXPORT(name) __attribute__((export_name(#name)))
@@ -110,6 +115,10 @@ typedef struct {
     bool  gateway_online; /* LoRa gateway answers with $ACK            */
     float pot_pct;        /* knob position                             */
     float duty_out;       /* what the MCU drives (PWM / DAC)           */
+    float press_pa;
+    bool  real_board;     /* BMP280 + LCD 1602 instead of SHT31 + OLED  */
+    bool  vbus_on;        /* 12 V supply connected                     */
+    bool  can_peer;       /* a second CAN node acknowledges frames     */
 } plant_t;
 
 static plant_t P;
@@ -212,6 +221,111 @@ static int w25_xfer(void *ctx, const uint8_t *tx, uint8_t *rx, size_t n)
 }
 
 /* ======================================================================
+ *  MCP2515 on SPI2 (own chip select PB11), 8 MHz crystal, 250 kbit/s
+ * ====================================================================== */
+static struct {
+    uint8_t  reg[128];
+    bool     cs;
+    uint8_t  ins, addr, mask;
+    uint32_t phase;
+    uint32_t peer_tx;      /* frames acknowledged by the second node */
+} M;
+
+static void mcp_reset(void)
+{
+    memset(M.reg, 0, sizeof M.reg);
+    M.reg[0x0E] = 0x80;    /* CANSTAT: configuration mode after reset */
+    M.reg[0x0F] = 0x87;    /* CANCTRL */
+}
+
+static void mcp_write_reg(uint8_t a, uint8_t v)
+{
+    a &= 0x7FU;
+    M.reg[a] = v;
+    if (a == 0x0F) { M.reg[0x0E] = (uint8_t)((M.reg[0x0E] & 0x1FU) | (v & 0xE0U)); }  /* mode switch */
+}
+
+static void mcp_select(void *ctx, bool on)
+{
+    (void)ctx;
+    if (!on && M.cs && (M.ins == 0x90 || M.ins == 0x94)) {
+        M.reg[0x2C] &= (uint8_t)~(M.ins == 0x90 ? 0x01U : 0x02U);   /* CS high clears RXnIF */
+    }
+    if (on) { M.phase = 0; }
+    M.cs = on;
+}
+
+static uint8_t mcp_byte(uint8_t in)
+{
+    uint8_t out = 0xFF;
+    if (M.phase == 0) {
+        M.ins = in;
+        if (in == 0xC0) { mcp_reset(); }
+        if (in == 0x81) { M.reg[0x30] |= 0x08U; }           /* RTS TXB0: TXREQ */
+        if (in == 0x40) { M.addr = 0x31; }                  /* LOAD TXB0 at SIDH */
+        if (in == 0x90) { M.addr = 0x61; }
+        if (in == 0x94) { M.addr = 0x71; }
+    } else {
+        switch (M.ins) {
+        case 0x03: if (M.phase == 1) { M.addr = in; } else { out = M.reg[M.addr++ & 0x7FU]; } break;
+        case 0x02: if (M.phase == 1) { M.addr = in; } else { mcp_write_reg(M.addr++, in); } break;
+        case 0x05:
+            if (M.phase == 1) { M.addr = in; }
+            else if (M.phase == 2) { M.mask = in; }
+            else if (M.phase == 3) { mcp_write_reg(M.addr, (uint8_t)((M.reg[M.addr & 0x7FU] & ~M.mask) | (in & M.mask))); }
+            break;
+        case 0x40: M.reg[M.addr++ & 0x7FU] = in; break;
+        case 0x90: case 0x94: out = M.reg[M.addr++ & 0x7FU]; break;
+        case 0xA0: out = (uint8_t)((M.reg[0x2C] & 0x03U) | ((M.reg[0x30] & 0x08U) ? 0x04U : 0U)); break;
+        default: break;
+        }
+    }
+    M.phase++;
+    return out;
+}
+
+static int mcp_xfer(void *ctx, const uint8_t *tx, uint8_t *rx, size_t n)
+{
+    (void)ctx;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t o = M.cs ? mcp_byte(tx ? tx[i] : 0xFF) : 0xFF;
+        if (rx) { rx[i] = o; }
+    }
+    return ERR_OK;
+}
+
+/* The bus during ~1 ms. Without a second node nobody sends the ACK bit:
+ * the MCP2515 retransmits, TEC grows by 8 per attempt and stops at 128
+ * (error passive), TXREQ stays set. With a peer the frame completes. */
+static void can_bus_ms(void)
+{
+    if ((M.reg[0x0E] & 0xE0U) != 0x00U || !(M.reg[0x30] & 0x08U)) {
+        return;                                         /* not in normal mode / nothing queued */
+    }
+    if (P.can_peer) {
+        M.reg[0x30] &= (uint8_t)~0x08U;
+        if (M.reg[0x1C] > 0U) { M.reg[0x1C]--; }
+        M.peer_tx++;
+    } else {
+        M.reg[0x1C] = (uint8_t)(M.reg[0x1C] + 8U > 128U ? 128U : M.reg[0x1C] + 8U);
+        M.reg[0x2D] = (uint8_t)(M.reg[0x1C] >= 128U ? 0x10U | 0x04U : (M.reg[0x1C] >= 96U ? 0x04U : 0U));
+    }
+}
+
+/* the second node answers with a heartbeat 0x705 once a second */
+static void can_peer_heartbeat(uint8_t state)
+{
+    if (!P.can_peer || (M.reg[0x0E] & 0xE0U) != 0x00U || (M.reg[0x2C] & 0x01U)) {
+        return;
+    }
+    M.reg[0x61] = (uint8_t)(0x705 >> 3);
+    M.reg[0x62] = (uint8_t)((0x705 & 7) << 5);
+    M.reg[0x65] = 1;
+    M.reg[0x66] = state;
+    M.reg[0x2C] |= 0x01U;                               /* RX0IF */
+}
+
+/* ======================================================================
  *  I2C1: SHT31 at 0x44, SSD1306 at 0x3C
  * ====================================================================== */
 static uint8_t  s_sht_reply[6];
@@ -266,11 +380,129 @@ static void oled_data(uint8_t b)
     }
 }
 
+/* BMP280 at 0x76: register file, Bosch datasheet example calibration */
+#define BMP_ADDR 0x76U
+static uint8_t s_bmp_reg[256];
+static uint8_t s_bmp_ptr;
+static const uint16_t BMP_CAL[12] = { 27504, 26435, (uint16_t)-1000, 36477, (uint16_t)-10685, 3024,
+                                      2855, 140, (uint16_t)-7, 15500, (uint16_t)-14600, 6000 };
+
+static void bmp_reset_regs(void)
+{
+    memset(s_bmp_reg, 0, sizeof s_bmp_reg);
+    for (int i = 0; i < 12; i++) {
+        s_bmp_reg[0x88 + 2 * i] = (uint8_t)BMP_CAL[i];
+        s_bmp_reg[0x89 + 2 * i] = (uint8_t)(BMP_CAL[i] >> 8);
+    }
+    s_bmp_reg[0xD0] = BMP280_CHIP_ID;
+}
+
+/* Forced measurement: find the raw ADC values the driver's own
+ * compensation turns into the plant's temperature and pressure. */
+static void bmp_measure(void)
+{
+    bme280_t dev;
+    bme280_sample_t s;
+    memset(&dev, 0, sizeof dev);
+    const uint16_t *c = BMP_CAL;
+    dev.cal.T1 = c[0]; dev.cal.T2 = (int16_t)c[1]; dev.cal.T3 = (int16_t)c[2];
+    dev.cal.P1 = c[3]; dev.cal.P2 = (int16_t)c[4]; dev.cal.P3 = (int16_t)c[5];
+    dev.cal.P4 = (int16_t)c[6]; dev.cal.P5 = (int16_t)c[7]; dev.cal.P6 = (int16_t)c[8];
+    dev.cal.P7 = (int16_t)c[9]; dev.cal.P8 = (int16_t)c[10]; dev.cal.P9 = (int16_t)c[11];
+    int32_t want_t = (int32_t)((P.temp_c + noise(0.05f)) * 100.0f);
+    int32_t lo = 300000, hi = 700000;            /* temperature rises with adc_t */
+    while (lo < hi) {
+        int32_t mid = (lo + hi) / 2;
+        bme280_compensate(&dev, mid, 400000, 0, &s);
+        if (s.temp_c100 < want_t) { lo = mid + 1; } else { hi = mid; }
+    }
+    int32_t adc_t = lo;
+    uint32_t want_p = (uint32_t)(P.press_pa + noise(3.0f));
+    lo = 200000; hi = 700000;                    /* pressure falls with adc_p */
+    while (lo < hi) {
+        int32_t mid = (lo + hi) / 2;
+        bme280_compensate(&dev, adc_t, mid, 0, &s);
+        if (s.press_pa > want_p) { lo = mid + 1; } else { hi = mid; }
+    }
+    int32_t adc_p = lo;
+    s_bmp_reg[0xF7] = (uint8_t)(adc_p >> 12); s_bmp_reg[0xF8] = (uint8_t)(adc_p >> 4);
+    s_bmp_reg[0xF9] = (uint8_t)((adc_p << 4) & 0xF0);
+    s_bmp_reg[0xFA] = (uint8_t)(adc_t >> 12); s_bmp_reg[0xFB] = (uint8_t)(adc_t >> 4);
+    s_bmp_reg[0xFC] = (uint8_t)((adc_t << 4) & 0xF0);
+}
+
+/* LCD 1602 behind a PCF8574 at 0x21: P0 RS, P2 EN, P3 backlight, P4-P7 data */
+#define LCD_ADDR 0x21U
+static char    s_lcd_ram[0x80];
+static uint8_t s_lcd_ac, s_lcd_prev, s_lcd_hi;
+static bool    s_lcd_4bit, s_lcd_half;
+
+static void lcd_reset(void)
+{
+    memset(s_lcd_ram, ' ', sizeof s_lcd_ram);
+    s_lcd_ac = s_lcd_prev = s_lcd_hi = 0;
+    s_lcd_4bit = s_lcd_half = false;
+}
+
+static void lcd_port(uint8_t v)
+{
+    if ((s_lcd_prev & 0x04U) && !(v & 0x04U)) {          /* EN falling edge latches */
+        uint8_t nib = v & 0xF0U;
+        if (!s_lcd_4bit) {
+            s_lcd_4bit = (nib == 0x20U);                 /* function set: 4-bit bus */
+        } else if (!s_lcd_half) {
+            s_lcd_hi = nib;
+            s_lcd_half = true;
+        } else {
+            uint8_t b = (uint8_t)(s_lcd_hi | (nib >> 4));
+            s_lcd_half = false;
+            if (v & 0x01U) {
+                s_lcd_ram[s_lcd_ac & 0x7FU] = (char)b;
+                s_lcd_ac++;
+            } else if (b == 0x01U) {
+                memset(s_lcd_ram, ' ', sizeof s_lcd_ram);
+                s_lcd_ac = 0;
+            } else if (b & 0x80U) {
+                s_lcd_ac = b & 0x7FU;
+            }
+        }
+    }
+    s_lcd_prev = v;
+}
+
+static char s_lcd_text[34];
+EXPORT(sim_lcd) const char *sim_lcd(void)
+{
+    memcpy(s_lcd_text, &s_lcd_ram[0x00], 16);
+    s_lcd_text[16] = '\n';
+    memcpy(&s_lcd_text[17], &s_lcd_ram[0x40], 16);
+    s_lcd_text[33] = '\0';
+    return s_lcd_text;
+}
+
 static uint32_t s_i2c_tx, s_i2c_nack;
 
 static int i2c_write(void *ctx, uint8_t addr, const uint8_t *d, size_t n)
 {
     (void)ctx;
+    if (addr == BMP_ADDR && P.real_board && !P.sht_unplugged) {
+        s_i2c_tx++;
+        if (n >= 1) { s_bmp_ptr = d[0]; }
+        if (n >= 2) {
+            if (d[0] == 0xF4 && (d[1] & 3U) == 1U) { bmp_measure(); }
+            else if (d[0] != 0xE0) { s_bmp_reg[d[0]] = d[1]; }
+        }
+        return ERR_OK;
+    }
+    if (addr == LCD_ADDR && P.real_board && !P.oled_unplugged) {
+        s_i2c_tx++;
+        for (size_t i = 0; i < n; i++) { lcd_port(d[i]); }
+        return ERR_OK;
+    }
+    if (P.real_board) {                     /* SHT31 and OLED are not fitted */
+        s_i2c_nack++;
+        return ERR_IO;
+    }
     if (addr == SHT3X_ADDR_DEFAULT && !P.sht_unplugged) {
         s_i2c_tx++;
         if (n == 2 && d[0] == 0x24) { sht_prepare(); }
@@ -292,7 +524,12 @@ static int i2c_write(void *ctx, uint8_t addr, const uint8_t *d, size_t n)
 static int i2c_read(void *ctx, uint8_t addr, uint8_t *d, size_t n)
 {
     (void)ctx;
-    if (addr == SHT3X_ADDR_DEFAULT && !P.sht_unplugged) {
+    if (addr == BMP_ADDR && P.real_board && !P.sht_unplugged) {
+        s_i2c_tx++;
+        for (size_t i = 0; i < n; i++) { d[i] = s_bmp_reg[s_bmp_ptr++]; }
+        return ERR_OK;
+    }
+    if (addr == SHT3X_ADDR_DEFAULT && !P.real_board && !P.sht_unplugged) {
         s_i2c_tx++;
         memcpy(d, s_sht_reply, n < 6 ? n : 6);
         return ERR_OK;
@@ -306,15 +543,31 @@ static int i2c_read(void *ctx, uint8_t addr, uint8_t *d, size_t n)
  * ====================================================================== */
 static const i2c_bus_t s_i2c = { i2c_write, i2c_read, NULL };
 static const spi_bus_t s_spi = { w25_xfer, w25_select, NULL };
+static const spi_bus_t s_spi_can = { mcp_xfer, mcp_select, NULL };
 
 static struct {
     fan_config_t cfg;
     /* measurements (sys_data_t.m on target) */
     float    temp_c, hum_pct, pot_percent, duty;
+    float    press_hpa;
     bool     temp_valid, flash_ok, oled_ok;
     uint16_t rpm;
     uint32_t sensor_errors;
 } D;
+
+typedef enum { SENS_NONE = 0, SENS_SHT, SENS_BMP } sens_kind_t;
+typedef enum { DISP_NONE = 0, DISP_OLED, DISP_LCD } disp_kind_t;
+static sens_kind_t s_sens;
+static disp_kind_t s_disp;
+static bme280_t    s_bme;
+static lcd1602_t   s_lcd;
+static mcp2515_t   s_can;
+static struct { bool present; uint32_t sent, busy, received; uint8_t tec, rec; } s_can_st;
+static struct {
+    uint16_t vdd_mv, vdd_min_mv;
+    uint32_t vbus_mv, vbus_min_mv;
+    bool     vbus_present, vbus_low;
+} s_pwr;
 
 static app_fsm_t       s_fsm;
 static fan_logic_t     s_logic;
@@ -416,6 +669,28 @@ static void post_event(app_event_t ev)
     }
 }
 
+/* SHT3x first, then BME280 / BMP280, as services/sensors.c does */
+static const char *sensor_name(void)
+{
+    return s_sens == SENS_SHT ? "SHT3x" : (s_sens == SENS_BMP ? (s_bme.has_humidity ? "BME280" : "BMP280") : "sensor");
+}
+
+static bool sensor_detect(bool verbose)
+{
+    if (sht3x_init(&s_sht, &s_i2c, SHT3X_ADDR_DEFAULT, no_delay) == ERR_OK) {
+        s_sens = SENS_SHT;
+        if (verbose) { log_printf("SENS", "SHT3x found at 0x%02X", SHT3X_ADDR_DEFAULT); }
+        return true;
+    }
+    if (bme280_init(&s_bme, &s_i2c, BMP_ADDR, no_delay) == ERR_OK) {
+        s_sens = SENS_BMP;
+        if (verbose) { log_printf("SENS", "%s found at 0x%02X (id 0x%02X)", sensor_name(), s_bme.addr, s_bme.chip_id); }
+        return true;
+    }
+    if (verbose) { log_printf("SENS", "no temperature sensor (SHT3x 0x44/45, BME280 0x76/77)"); }
+    return false;
+}
+
 /* ---------------- sensors task body ---------------- */
 static void sensors_step(void)
 {
@@ -430,16 +705,22 @@ static void sensors_step(void)
     if (s_ms % 1000U != 0U) {
         return;
     }
-    if (!s_sht_present && s_ms % 5000U == 0U) {
-        s_sht_present = (sht3x_soft_reset(&s_sht) == ERR_OK);
-        if (s_sht_present) { log_printf("SENS", "SHT31 found"); }
+    if (!s_sht_present && s_ms % 10000U == 0U) {
+        s_sht_present = sensor_detect(false);
+        if (s_sht_present) { log_printf("SENS", "%s found", sensor_name()); }
     }
-    sht3x_sample_t s;
-    int rc = s_sht_present ? sht3x_measure(&s_sht, &s) : ERR_NOT_FOUND;
+    int rc = ERR_NOT_FOUND;
+    if (s_sht_present && s_sens == SENS_SHT) {
+        sht3x_sample_t s;
+        rc = sht3x_measure(&s_sht, &s);
+        if (rc == ERR_OK) { D.temp_c = s.temp_c100 / 100.0f; D.hum_pct = s.hum_c100 / 100.0f; D.press_hpa = 0.0f; }
+    } else if (s_sht_present && s_sens == SENS_BMP) {
+        bme280_sample_t s;
+        rc = bme280_measure(&s_bme, &s);
+        if (rc == ERR_OK) { D.temp_c = s.temp_c100 / 100.0f; D.hum_pct = s.hum_c100 / 100.0f; D.press_hpa = s.press_pa / 100.0f; }
+    }
     if (rc == ERR_OK) {
         s_sht_errors = 0;
-        D.temp_c = s.temp_c100 / 100.0f;
-        D.hum_pct = s.hum_c100 / 100.0f;
         D.temp_valid = true;
     } else {
         D.sensor_errors++;
@@ -447,7 +728,7 @@ static void sensors_step(void)
         if (s_sht_errors >= 3 && D.temp_valid) {
             D.temp_valid = false;
             s_sht_present = false;
-            log_printf("SENS", "SHT31 lost");
+            log_printf("SENS", "%s lost", sensor_name());
         }
     }
 }
@@ -483,6 +764,28 @@ static void display_step(void)
         return;
     }
     char line[24], a[16], b[16];
+    if (s_disp == DISP_LCD) {                /* same layout as draw_lcd() in display.c */
+        char l1[24];
+        uint32_t tick = s_ms / 500U;
+        if (D.temp_valid) {
+            snprintf(line, sizeof line, "%-7s T%sC", app_state_name(s_fsm.state), fmt1(a, D.temp_c));
+        } else {
+            snprintf(line, sizeof line, "%-7s T --.-C", app_state_name(s_fsm.state));
+        }
+        uint32_t f = fault_bits(&s_faults);
+        int first = -1;
+        for (int i = 0; f != 0U && i < FAULT_COUNT && first < 0; i++) { if (f & (1UL << i)) { first = i; } }
+        if (first >= 0 && (tick / 2U) % 2U == 0U) {
+            snprintf(l1, sizeof l1, "! %s", fault_name((fault_id_t)first));
+        } else {
+            snprintf(l1, sizeof l1, "Out%3u%% %5urpm", (unsigned)(D.duty + 0.5f), D.rpm);
+        }
+        if (lcd1602_line(&s_lcd, 0U, line) != ERR_OK || lcd1602_line(&s_lcd, 1U, l1) != ERR_OK) {
+            D.oled_ok = false;
+            log_printf("DISP", "I2C error, display off");
+        }
+        return;
+    }
     ssd1306_clear(&s_oled);
     snprintf(line, sizeof line, "FAN CTRL    %-6s", app_state_name(s_fsm.state));
     ssd1306_text(&s_oled, 0, 0, line);
@@ -511,6 +814,70 @@ static void display_step(void)
         D.oled_ok = false;
         log_printf("OLED", "I2C error, display off");
     }
+}
+
+/* ---------------- CAN task body (1 s), as services/can_link.c ---------------- */
+static void can_send(const can_frame_t *f)
+{
+    for (uint32_t t = 0U; ; t++) {
+        int rc = mcp2515_send(&s_can, f);
+        if (rc == ERR_OK) { s_can_st.sent++; return; }
+        if (rc != ERR_BUSY || t >= 20U) { s_can_st.busy++; return; }
+        can_bus_ms();                          /* vTaskDelay(1 ms) on the target */
+    }
+}
+
+static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+
+static void can_step(void)
+{
+    if (s_ms % 1000U != 0U || !s_can_st.present) {
+        return;
+    }
+    can_frame_t f1, f2, rx;
+    memset(&f1, 0, sizeof f1);
+    memset(&f2, 0, sizeof f2);
+    f1.id = 0x180U + (D.cfg.node_id & 0x7FU);
+    f1.dlc = 8U;
+    put16(&f1.data[0], (uint16_t)(D.temp_valid ? (int16_t)(D.temp_c * 100.0f) : (int16_t)0x8000));
+    put16(&f1.data[2], D.temp_valid ? (uint16_t)(D.hum_pct * 100.0f) : 0U);
+    put16(&f1.data[4], D.rpm);
+    put16(&f1.data[6], (uint16_t)(D.duty * 10.0f + 0.5f));
+    f2.id = 0x280U + (D.cfg.node_id & 0x7FU);
+    f2.dlc = 8U;
+    f2.data[0] = (uint8_t)s_fsm.state;
+    f2.data[1] = (uint8_t)fault_bits(&s_faults);
+    f2.data[2] = (uint8_t)((D.temp_valid ? 1U : 0U) | (D.flash_ok ? 2U : 0U) | (D.oled_ok ? 4U : 0U));
+    put16(&f2.data[4], (uint16_t)(s_ms / 1000U));
+    put16(&f2.data[6], (uint16_t)((s_ms / 1000U) >> 16));
+    can_send(&f1);
+    can_send(&f2);
+    can_bus_ms();
+    can_peer_heartbeat(5U);                    /* peer: NMT operational */
+    while (mcp2515_receive(&s_can, &rx) == ERR_OK) { s_can_st.received++; }
+    mcp2515_errors_t e;
+    if (mcp2515_read_errors(&s_can, &e) == ERR_OK) { s_can_st.tec = e.tec; s_can_st.rec = e.rec; }
+}
+
+/* ---------------- power monitor (1 s), thresholds of services/power.c ---------------- */
+static void power_step(void)
+{
+    if (s_ms % 1000U != 0U) {
+        return;
+    }
+    char a[16];
+    s_pwr.vdd_mv = (uint16_t)(3300.0f + noise(8.0f));
+    if (s_pwr.vdd_min_mv == 0U || s_pwr.vdd_mv < s_pwr.vdd_min_mv) { s_pwr.vdd_min_mv = s_pwr.vdd_mv; }
+    s_pwr.vbus_mv = P.vbus_on ? (uint32_t)(12050.0f + noise(40.0f)) : (uint32_t)(40.0f + noise(30.0f));
+    bool change = s_pwr.vbus_present ? (s_pwr.vbus_mv < 5000U) : (s_pwr.vbus_mv > 8000U);
+    if (change) {
+        s_pwr.vbus_present = !s_pwr.vbus_present;
+        s_pwr.vbus_min_mv = s_pwr.vbus_mv;
+        snprintf(a, sizeof a, "%.2f", s_pwr.vbus_mv / 1000.0);
+        log_printf("PWR", "12V supply %s (%s V)", s_pwr.vbus_present ? "connected" : "not connected", a);
+    }
+    if (s_pwr.vbus_present && s_pwr.vbus_mv < s_pwr.vbus_min_mv) { s_pwr.vbus_min_mv = s_pwr.vbus_mv; }
+    s_pwr.vbus_low = s_pwr.vbus_present && s_pwr.vbus_min_mv < 10800U;
 }
 
 /* ---------------- radio link task body (100 ms) ---------------- */
@@ -711,7 +1078,9 @@ static int cmd_status(cli_t *c, int argc, char *argv[])
     char a[16], b[16];
     cli_printf(c, "state    %s\r\n", app_state_name(s_fsm.state));
     if (D.temp_valid) {
-        cli_printf(c, "temp     %s C   hum %s %%\r\n", fmt1(a, D.temp_c), fmt1(b, D.hum_pct));
+        cli_printf(c, "temp     %s C   hum %s %%", fmt1(a, D.temp_c), fmt1(b, D.hum_pct));
+        if (D.press_hpa > 0.0f) { cli_printf(c, "   press %s hPa", fmt1(a, D.press_hpa)); }
+        cli_printf(c, "   (%s)\r\n", sensor_name());
     } else {
         cli_printf(c, "temp     -- (no sensor)\r\n");
     }
@@ -870,6 +1239,29 @@ static int cmd_stats(cli_t *c, int argc, char *argv[])
                (unsigned long)s_link_sent, (unsigned long)s_link_acked, (unsigned long)s_link_cmds);
     cli_printf(c, "i2c     transfers %lu  nack %lu   sensor errors %lu\r\n",
                (unsigned long)s_i2c_tx, (unsigned long)s_i2c_nack, (unsigned long)D.sensor_errors);
+    if (s_can_st.present) {
+        cli_printf(c, "can     sent %lu  dropped %lu  rx %lu  tec %u  rec %u\r\n", (unsigned long)s_can_st.sent,
+                   (unsigned long)s_can_st.busy, (unsigned long)s_can_st.received, s_can_st.tec, s_can_st.rec);
+    } else {
+        cli_printf(c, "can     no MCP2515\r\n");
+    }
+    return 0;
+}
+
+static int cmd_power(cli_t *c, int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    char a[16], b[16];
+    snprintf(a, sizeof a, "%.2f", s_pwr.vdd_mv / 1000.0);
+    snprintf(b, sizeof b, "%.2f", s_pwr.vdd_min_mv / 1000.0);
+    cli_printf(c, "VDD   %s V   min %s V   %s\r\n", a, b, s_pwr.vdd_mv < 3000U ? "LOW (< 3.00 V)" : "ok");
+    snprintf(a, sizeof a, "%.2f", s_pwr.vbus_mv / 1000.0);
+    snprintf(b, sizeof b, "%.2f", s_pwr.vbus_min_mv / 1000.0);
+    if (s_pwr.vbus_present) {
+        cli_printf(c, "12V   %s V   min %s V   %s\r\n", a, b, s_pwr.vbus_low ? "LOW (< 10.80 V)" : "ok");
+    } else {
+        cli_printf(c, "12V   not connected (%s V on the divider input)\r\n", a);
+    }
     return 0;
 }
 
@@ -899,8 +1291,9 @@ static const cli_cmd_t s_cmds[] = {
     { "flash",    "SPI flash info",                    cmd_flash },
     { "i2c",      "scan the I2C bus",                  cmd_i2c },
     { "fault",    "clear latched faults",              cmd_fault },
-    { "stats",    "Modbus / LoRa / I2C counters",      cmd_stats },
+    { "stats",    "Modbus / LoRa / I2C / CAN counters", cmd_stats },
     { "wdt",      "watchdog status | test | clear",    cmd_wdt },
+    { "power",    "VDD and 12 V supply",               cmd_power },
 };
 
 static char s_line_in[CLI_LINE_MAX];
@@ -969,10 +1362,31 @@ static void firmware_boot(void)
         memset(&s_log, 0, sizeof s_log);
         log_printf("FLASH", "SPI flash NOT found - running without log");
     }
-    s_sht_present = (sht3x_init(&s_sht, &s_i2c, SHT3X_ADDR_DEFAULT, no_delay) == ERR_OK);
-    log_printf("SENS", "SHT31 %s", s_sht_present ? "found" : "NOT found");
-    D.oled_ok = (ssd1306_init(&s_oled, &s_i2c, SSD1306_ADDR) == ERR_OK);
-    log_printf("OLED", "SSD1306 %s", D.oled_ok ? "found" : "NOT found");
+    s_sens = SENS_NONE;
+    s_sht_present = sensor_detect(true);
+    /* display: SSD1306 first, then an LCD 16x2 behind a PCF8574, as display.c */
+    static const uint8_t lcd_addr[] = { LCD1602_ADDR_DEFAULT, LCD1602_ADDR_ALT, 0x20U, 0x21U, 0x22U, 0x23U,
+                                        0x24U, 0x25U, 0x26U, 0x39U, 0x3AU, 0x3BU, 0x3EU };
+    s_disp = DISP_NONE;
+    lcd_reset();
+    if (ssd1306_init(&s_oled, &s_i2c, SSD1306_ADDR) == ERR_OK) {
+        s_disp = DISP_OLED;
+        log_printf("DISP", "OLED SSD1306 found at 0x%02X", SSD1306_ADDR);
+    } else {
+        for (size_t i = 0; i < sizeof lcd_addr; i++) {
+            if (lcd1602_init(&s_lcd, &s_i2c, lcd_addr[i], 16U, 2U, no_delay) == ERR_OK) {
+                s_disp = DISP_LCD;
+                log_printf("DISP", "LCD 16x2 (PCF8574) found at 0x%02X", lcd_addr[i]);
+                break;
+            }
+        }
+        if (s_disp == DISP_NONE) { log_printf("DISP", "no display (SSD1306 0x3C, LCD 0x20-0x27/0x39-0x3F)"); }
+    }
+    D.oled_ok = (s_disp != DISP_NONE);
+    memset(&s_can_st, 0, sizeof s_can_st);
+    s_can_st.present = (mcp2515_init(&s_can, &s_spi_can, no_delay, 8000000UL, 250000UL, MCP2515_MODE_NORMAL) == ERR_OK);
+    log_printf("CAN", "%s", s_can_st.present ? "MCP2515 found, 250 kbit/s, 8 MHz crystal" : "no MCP2515 found");
+    memset(&s_pwr, 0, sizeof s_pwr);
 
     mb_slave_init(&s_mb, D.cfg.modbus_addr, &s_mb_cb);
     cli_init(&s_cli, s_cmds, sizeof s_cmds / sizeof s_cmds[0], cli_write, false);
@@ -990,12 +1404,18 @@ static void firmware_boot(void)
 /** Power-on: plant at room temperature, empty flash. */
 EXPORT(sim_init) void sim_init(uint32_t unix_now)
 {
+    bool real = P.real_board;               /* board variant is a UI setting */
     memset(&P, 0, sizeof P);
+    P.real_board = real;
     P.ambient_c = 28.0f;
     P.heat_pct = 30.0f;
     P.temp_c = P.ambient_c;
     P.hum_pct = 55.0f;
     P.gateway_online = true;
+    P.press_pa = 101210.0f;
+    P.vbus_on = true;
+    bmp_reset_regs();
+    mcp_reset();
     P.pot_pct = 50.0f;
     memset(W.mem, 0xFF, W25_SIZE);
     s_unix0 = unix_now;
@@ -1025,6 +1445,8 @@ EXPORT(sim_run) void sim_run(int ticks)
         if (!s_sv_hung[SV_STORAGE]) { storage_step(); sv_kick(SV_STORAGE); }
         if (!s_sv_hung[SV_DISPLAY]) { display_step(); sv_kick(SV_DISPLAY); }
         if (!s_sv_hung[SV_LINK])    { link_step(); sv_kick(SV_LINK); }
+        can_step();
+        power_step();
         if (!s_sv_hung[SV_CONSOLE]) { sv_kick(SV_CONSOLE); }
         supervisor_step();
         if (s_wdt_fired) {
@@ -1052,6 +1474,9 @@ EXPORT(sim_set) void sim_set(int id, float v)
     case 6: P.flash_missing = v != 0.0f; break;
     case 7: P.gateway_online = v != 0.0f; break;
     case 8: if (v >= 0.0f && v < SV_COUNT) { s_sv_hung[(int)v] = true; } break;   /* hang task #v */
+    case 9:  P.real_board = v != 0.0f; break;   /* takes effect at the next reset */
+    case 10: P.vbus_on = v != 0.0f; break;
+    case 11: P.can_peer = v != 0.0f; break;
     default: break;
     }
 }
@@ -1086,10 +1511,15 @@ EXPORT(sim_get) float sim_get(int id)
     case 15: return (float)s_link_acked;
     case 16: return (float)(s_log.count - (s_log.unsent >= s_log.tail ? s_log.unsent - s_log.tail
                                            : s_log.total_slots - s_log.tail + s_log.unsent));
-    case 17: return s_oled_on && D.oled_ok ? 1.0f : 0.0f;
+    case 17: return (s_disp == DISP_LCD || s_oled_on) && D.oled_ok ? 1.0f : 0.0f;
     case 18: return D.cfg.modbus_addr;
     case 19: return (float)s_wdt_resets;
     case 20: return s_sv_late >= 0 ? 1.0f : 0.0f;   /* supervisor stopped feeding IWDG */
+    case 21: return (float)s_disp;                  /* 1 OLED, 2 LCD              */
+    case 22: return s_sht_present ? (float)s_sens : 0.0f;   /* 1 SHT3x, 2 BMP280 */
+    case 23: return (float)s_can_st.sent;
+    case 24: return (float)s_can_st.tec;
+    case 25: return D.press_hpa;
     default: return 0.0f;
     }
 }

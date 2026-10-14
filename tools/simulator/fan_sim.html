@@ -54,6 +54,7 @@ h2 { font: 600 13px var(--f-body); letter-spacing: .08em; text-transform: upperc
 @media (max-width: 520px) { .board { grid-template-columns: minmax(0, 1fr) } }
 .oled { background: var(--oled-bg); border: 6px solid #1b1f22; border-radius: 4px; padding: 4px; width: 100%; max-width: 300px }
 .oled canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; aspect-ratio: 2 / 1 }
+.lcd { background: #9bc23c; color: #1d2a0c; border: 6px solid #1b1f22; border-radius: 4px; padding: 8px 10px; width: 100%; max-width: 300px; font: 600 20px/1.25 var(--f-mono); white-space: pre; letter-spacing: .06em }
 .silk { font: 500 10px var(--f-mono); letter-spacing: .08em; color: #9fc0cc; margin-top: 6px }
 .ios { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px 12px; align-content: start }
 .io { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0 }
@@ -149,14 +150,16 @@ code { font-family: var(--f-mono); font-size: .92em }
       <h2>Bo mạch NUCLEO-G0B1RE</h2>
       <div class="board">
         <div>
-          <div class="oled"><canvas id="oled" width="128" height="64" aria-label="Màn hình OLED SSD1306"></canvas></div>
-          <div class="silk">SSD1306 128×64 · I2C1 0x3C</div>
+          <div class="oled" id="oled-box"><canvas id="oled" width="128" height="64" aria-label="Màn hình OLED SSD1306"></canvas></div>
+          <div class="lcd" id="lcd" hidden aria-label="Màn hình LCD 1602"></div>
+          <div class="silk" id="disp-silk">SSD1306 128×64 · I2C1 0x3C</div>
         </div>
         <div class="ios">
           <div class="io"><span class="led g" id="ld4"></span>LD4 trạng thái (PA5)</div>
           <div class="io"><span class="led r" id="relay"></span>Relay báo động (PC0)</div>
           <div class="io"><span class="led g" id="ldflash"></span>W25Q64 (SPI2)</div>
-          <div class="io"><span class="led g" id="ldsht"></span>SHT31 (I2C1 0x44)</div>
+          <div class="io"><span class="led g" id="ldsht"></span><span id="sens-name">SHT31 (I2C1 0x44)</span></div>
+          <div class="io"><span class="led g" id="ldcan"></span>MCP2515 CAN có ACK</div>
           <div class="io"><span class="led g" id="ldlora"></span>LoRa gateway</div>
           <div class="io"><span class="led r" id="ldwdg"></span>IWDG ngừng được nạp</div>
           <div class="io"><button class="b1" id="b1" title="Nút B1 (PC13): đổi chế độ OFF → MANUAL → AUTO">B1</button>Nút người dùng</div>
@@ -170,6 +173,8 @@ code { font-family: var(--f-mono); font-size: .92em }
         <div class="ro"><div class="k">Tốc độ quạt</div><div class="v" id="r-rpm">--<small>rpm</small></div></div>
         <div class="ro"><div class="k">DAC 0-10 V</div><div class="v" id="r-v">--<small>V</small></div></div>
         <div class="ro"><div class="k">Bản ghi log</div><div class="v" id="r-log">--<small id="r-unsent"></small></div></div>
+        <div class="ro"><div class="k">Áp suất (BMP280)</div><div class="v" id="r-p">--<small>hPa</small></div></div>
+        <div class="ro"><div class="k">CAN gửi / TEC</div><div class="v" id="r-can">--</div></div>
       </div>
     </section>
 
@@ -191,10 +196,13 @@ code { font-family: var(--f-mono); font-size: .92em }
       </div>
       <div class="toggles">
         <label class="tg"><input type="checkbox" id="f-jam" data-id="3"> Kẹt cánh quạt</label>
-        <label class="tg"><input type="checkbox" id="f-sht" data-id="4"> Rút dây SHT31</label>
-        <label class="tg"><input type="checkbox" id="f-oled" data-id="5"> Rút OLED</label>
+        <label class="tg"><input type="checkbox" id="f-sht" data-id="4"> Rút dây cảm biến</label>
+        <label class="tg"><input type="checkbox" id="f-oled" data-id="5"> Rút màn hình</label>
         <label class="tg"><input type="checkbox" id="f-flash" data-id="6"> Tháo W25Q64 (cần reset)</label>
         <label class="tg ok"><input type="checkbox" id="f-gw" data-id="7" checked> Gateway LoRa online</label>
+        <label class="tg"><input type="checkbox" id="f-real" data-id="9"> Bo thật: BMP280 + LCD 1602 (tự reset)</label>
+        <label class="tg ok"><input type="checkbox" id="f-vbus" data-id="10" checked> Nguồn 12 V</label>
+        <label class="tg"><input type="checkbox" id="f-can" data-id="11"> Nút CAN thứ hai (trả ACK)</label>
       </div>
       <div>
         <h2 style="margin-top:4px">Kịch bản nhanh</h2>
@@ -244,7 +252,7 @@ code { font-family: var(--f-mono); font-size: .92em }
         <button data-cmd="pid">pid</button><button data-cmd="log dump 5">log dump 5</button>
         <button data-cmd="i2c">i2c</button><button data-cmd="flash">flash</button>
         <button data-cmd="fault">fault</button><button data-cmd="stats">stats</button><button data-cmd="cfg">cfg</button>
-        <button data-cmd="wdt">wdt</button><button data-cmd="wdt test">wdt test</button>
+        <button data-cmd="wdt">wdt</button><button data-cmd="wdt test">wdt test</button><button data-cmd="power">power</button>
       </div>
     </div>
 
@@ -301,7 +309,7 @@ code { font-family: var(--f-mono); font-size: .92em }
   </section>
 
   <footer>
-    Phần chạy trong trang là mã nguồn firmware ở <code>src/app</code>, <code>src/middleware</code> và <code>src/drivers</code>, biên dịch bằng <code>tools/simulator/build_sim.sh</code>. Các chip W25Q64, SHT31, SSD1306 được giả lập ở mức byte trên bus SPI/I2C, nên driver thật chạy nguyên vẹn. Phần RTOS và HAL được thay bằng một vòng lặp 100 ms gọi các bước giống các task trên chip. Mô hình nhiệt là mô hình bậc một đơn giản, không phải số liệu đo.
+    Phần chạy trong trang là mã nguồn firmware ở <code>src/app</code>, <code>src/middleware</code> và <code>src/drivers</code>, biên dịch bằng <code>tools/simulator/build_sim.sh</code>. Các chip W25Q64, MCP2515, SHT31, SSD1306, BMP280 và LCD 1602 (PCF8574) được giả lập ở mức byte trên bus SPI/I2C, nên driver thật chạy nguyên vẹn. Watchdog hai tầng dùng cùng thời hạn tác vụ với firmware. Phần RTOS và HAL được thay bằng một vòng lặp 100 ms gọi các bước giống các task trên chip. Mô hình nhiệt là mô hình bậc một đơn giản, không phải số liệu đo.
   </footer>
 </div>
 
@@ -333,7 +341,7 @@ code { font-family: var(--f-mono); font-size: .92em }
     if (kind === "air") {
       html = html.replace(/^-&gt; (.*)$/gm, '<span class="tx">→ $1</span>').replace(/^&lt;- (.*)$/gm, '<span class="rx">← $1</span>');
     } else {
-      html = html.replace(/^(\[[^\]]*\] (?:CTRL|FAULT|LINK|SENS|OLED|FLASH|SYS|CFG|WDG).*)$/gm, '<span class="ev">$1</span>');
+      html = html.replace(/^(\[[^\]]*\] (?:CTRL|FAULT|LINK|SENS|OLED|DISP|FLASH|SYS|CFG|WDG|CAN|PWR).*)$/gm, '<span class="ev">$1</span>');
     }
     el.insertAdjacentHTML("beforeend", html);
     if (el.textContent.length > 60000) el.innerHTML = el.innerHTML.slice(-40000);
@@ -348,6 +356,10 @@ code { font-family: var(--f-mono); font-size: .92em }
   /* ---------- OLED: GDDRAM is 8 pages x 128 columns, bit 0 = top row of the page ---------- */
   var octx = $("oled").getContext("2d"), oimg = octx.createImageData(128, 64);
   function drawOled() {
+    var lcd = E.sim_get(21) === 2;
+    $("oled-box").hidden = lcd; $("lcd").hidden = !lcd;
+    $("disp-silk").textContent = lcd ? "LCD 1602 · PCF8574 · I2C1 0x21" : "SSD1306 128×64 · I2C1 0x3C";
+    if (lcd) { $("lcd").textContent = E.sim_get(17) > 0 ? readStr(E.sim_lcd()) : "                \n                "; return; }
     var on = E.sim_get(17) > 0, p = E.sim_oled(), m = mem(), d = oimg.data;
     var px = [127, 215, 255], bg = [5, 11, 16];
     for (var y = 0; y < 64; y++) for (var x = 0; x < 128; x++) {
@@ -378,6 +390,11 @@ code { font-family: var(--f-mono); font-size: .92em }
     $("ldsht").classList.toggle("on", meas > -900);
     $("ldlora").classList.toggle("on", $("f-gw").checked);
     $("ldwdg").classList.toggle("on", E.sim_get(20) > 0);
+    var sk = E.sim_get(22), pr = E.sim_get(25);
+    $("sens-name").textContent = sk === 2 ? "BMP280 (I2C1 0x76)" : "SHT31 (I2C1 0x44)";
+    setV("r-p", pr > 0 ? pr.toFixed(1) : "--", "hPa");
+    setV("r-can", Math.round(E.sim_get(23)) + " / " + Math.round(E.sim_get(24)), "");
+    $("ldcan").classList.toggle("on", E.sim_get(24) < 128 && E.sim_get(23) > 1);
     var t = E.sim_get(9);
     $("clock").textContent = Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0");
   }
@@ -469,6 +486,7 @@ code { font-family: var(--f-mono); font-size: .92em }
   document.querySelectorAll(".tg input[data-id]").forEach(function (c) {
     c.onchange = function () { E.sim_set(+c.dataset.id, c.checked ? 1 : 0); };
   });
+  $("f-real").onchange = function () { E.sim_set(9, this.checked ? 1 : 0); $("reset").click(); };
   function applyPlant() {
     E.sim_set(1, +$("s-heat").value); E.sim_set(0, +$("s-amb").value); E.sim_set(2, +$("s-pot").value);
     document.querySelectorAll(".tg input[data-id]").forEach(function (c) { E.sim_set(+c.dataset.id, c.checked ? 1 : 0); });
