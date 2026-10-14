@@ -333,6 +333,45 @@ static bool            s_dirty;          /* settings changed but not saved */
 
 static const char *fmt1(char *b, float v) { snprintf(b, 16, "%.1f", (double)v); return b; }
 
+/* ======================================================================
+ *  Two-tier watchdog: per-task deadlines (services/supervisor.c) + IWDG
+ * ====================================================================== */
+#define IWDG_TIMEOUT_MS 2000U
+enum { SV_CONTROL, SV_SENSORS, SV_STORAGE, SV_DISPLAY, SV_LINK, SV_CONSOLE, SV_COUNT };
+static const struct { const char *name; uint32_t timeout_ms; } SV[SV_COUNT] = {
+    { "control", 500U }, { "sensors", 1000U }, { "storage", 70000U },
+    { "display", 3000U }, { "link", 5000U }, { "console", 3000U },
+};
+static uint32_t    s_sv_kick[SV_COUNT];
+static bool        s_sv_hung[SV_COUNT];   /* injected: task stuck in an endless loop */
+static int         s_sv_late;             /* first task that missed its deadline, -1 = none */
+static uint32_t    s_iwdg_fed;            /* last IWDG refresh */
+static uint32_t    s_wdt_resets;          /* RTC backup register DR1: kept over a reset */
+static const char *s_reset_cause = "POWER";
+static bool        s_wdt_fired;
+
+static void sv_kick(int id) { s_sv_kick[id] = s_ms; }
+
+/* supervisor task (250 ms): feed the IWDG only while every task is on time */
+static void supervisor_step(void)
+{
+    if (s_ms % 250U != 0U) {
+        return;
+    }
+    for (int i = 0; s_sv_late < 0 && i < SV_COUNT; i++) {
+        if (s_ms - s_sv_kick[i] > SV[i].timeout_ms) {
+            s_sv_late = i;
+            log_printf("WDG", "task '%s' missed its %lu ms deadline -> reset", SV[i].name,
+                       (unsigned long)SV[i].timeout_ms);
+        }
+    }
+    if (s_sv_late < 0) {
+        s_iwdg_fed = s_ms;
+    } else if (s_ms - s_iwdg_fed >= IWDG_TIMEOUT_MS) {
+        s_wdt_fired = true;                 /* IWDG counter reached 0 */
+    }
+}
+
 /* ---------------- control task body (100 ms) ---------------- */
 static void control_step(uint32_t tick)
 {
@@ -797,6 +836,31 @@ static int cmd_fault(cli_t *c, int argc, char *argv[])
     return 0;
 }
 
+static int cmd_wdt(cli_t *c, int argc, char *argv[])
+{
+    if (argc == 2 && strcmp(argv[1], "test") == 0) {
+        cli_printf(c, "console task hangs now: supervisor reports it after %lu ms, IWDG resets %lu ms later\r\n",
+                   (unsigned long)SV[SV_CONSOLE].timeout_ms, (unsigned long)IWDG_TIMEOUT_MS);
+        s_sv_hung[SV_CONSOLE] = true;
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "clear") == 0) {
+        s_wdt_resets = 0;
+    } else if (argc != 1) {
+        cli_printf(c, "usage: wdt | wdt test | wdt clear\r\n");
+        return 1;
+    }
+    cli_printf(c, "IWDG %lu ms   watchdog resets %lu   last reset %s\r\n", (unsigned long)IWDG_TIMEOUT_MS,
+               (unsigned long)s_wdt_resets, s_reset_cause);
+    cli_printf(c, "task       deadline   last kick  state\r\n");
+    for (int i = 0; i < SV_COUNT; i++) {
+        uint32_t age = s_ms - s_sv_kick[i];
+        cli_printf(c, "%-10s %6lu ms %8lu ms  %s\r\n", SV[i].name, (unsigned long)SV[i].timeout_ms,
+                   (unsigned long)age, age > SV[i].timeout_ms ? "LATE" : "ok");
+    }
+    return 0;
+}
+
 static int cmd_stats(cli_t *c, int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -836,6 +900,7 @@ static const cli_cmd_t s_cmds[] = {
     { "i2c",      "scan the I2C bus",                  cmd_i2c },
     { "fault",    "clear latched faults",              cmd_fault },
     { "stats",    "Modbus / LoRa / I2C counters",      cmd_stats },
+    { "wdt",      "watchdog status | test | clear",    cmd_wdt },
 };
 
 static char s_line_in[CLI_LINE_MAX];
@@ -849,7 +914,9 @@ EXPORT(sim_cli) void sim_cli(void)
     out_put(&s_console, "> ");
     out_put(&s_console, line);
     out_put(&s_console, "\r\n");
-    (void)cli_execute(&s_cli, line);
+    if (!s_sv_hung[SV_CONSOLE]) {           /* a hung console task reads nothing */
+        (void)cli_execute(&s_cli, line);
+    }
 }
 
 /** A line typed on the gateway side (e.g. $CMD,...) sent over the air. */
@@ -878,7 +945,15 @@ static void firmware_boot(void)
     memset(s_oled_ram, 0, sizeof s_oled_ram);
     s_oled_on = false;
 
-    log_printf("SYS", "fan controller simulator, firmware 1.0 (STM32G0B1RE model)");
+    memset(s_sv_kick, 0, sizeof s_sv_kick);
+    memset(s_sv_hung, 0, sizeof s_sv_hung);
+    s_sv_late = -1;
+    s_iwdg_fed = 0;
+    s_wdt_fired = false;
+
+    log_printf("SYS", "fan controller simulator, firmware 1.0 (STM32G0B1RE model), reset: %s", s_reset_cause);
+    log_printf("WDG", "IWDG %lu ms, %lu watchdog reset(s) since power-up", (unsigned long)IWDG_TIMEOUT_MS,
+               (unsigned long)s_wdt_resets);
     fan_config_defaults(&D.cfg);
     D.cfg.stall_rpm = 300;          /* stall detection on, so it can be demonstrated */
 
@@ -924,6 +999,8 @@ EXPORT(sim_init) void sim_init(uint32_t unix_now)
     P.pot_pct = 50.0f;
     memset(W.mem, 0xFF, W25_SIZE);
     s_unix0 = unix_now;
+    s_wdt_resets = 0;                       /* backup domain lost with power */
+    s_reset_cause = "POWER";
     sim_outputs_clear();
     firmware_boot();
 }
@@ -932,21 +1009,31 @@ EXPORT(sim_init) void sim_init(uint32_t unix_now)
 EXPORT(sim_reset) void sim_reset(void)
 {
     s_unix0 += s_ms / 1000U;
+    s_reset_cause = "PIN";
     out_put(&s_console, "\r\n--- RESET ---\r\n");
     firmware_boot();
 }
 
-/** Advance simulated time by n ticks of 100 ms. */
+/** Advance simulated time by n ticks of 100 ms. A hung task skips its step. */
 EXPORT(sim_run) void sim_run(int ticks)
 {
     for (int i = 0; i < ticks; i++) {
         plant_step(TICK_MS / 1000.0f);
         s_ms += TICK_MS;
-        sensors_step();
-        control_step(s_ms / TICK_MS);
-        storage_step();
-        display_step();
-        link_step();
+        if (!s_sv_hung[SV_SENSORS]) { sensors_step(); sv_kick(SV_SENSORS); }
+        if (!s_sv_hung[SV_CONTROL]) { control_step(s_ms / TICK_MS); sv_kick(SV_CONTROL); }
+        if (!s_sv_hung[SV_STORAGE]) { storage_step(); sv_kick(SV_STORAGE); }
+        if (!s_sv_hung[SV_DISPLAY]) { display_step(); sv_kick(SV_DISPLAY); }
+        if (!s_sv_hung[SV_LINK])    { link_step(); sv_kick(SV_LINK); }
+        if (!s_sv_hung[SV_CONSOLE]) { sv_kick(SV_CONSOLE); }
+        supervisor_step();
+        if (s_wdt_fired) {
+            s_wdt_resets++;
+            s_reset_cause = "IWDG";
+            s_unix0 += s_ms / 1000U;
+            out_put(&s_console, "\r\n--- IWDG RESET ---\r\n");
+            firmware_boot();
+        }
     }
 }
 
@@ -964,6 +1051,7 @@ EXPORT(sim_set) void sim_set(int id, float v)
     case 5: P.oled_unplugged = v != 0.0f; break;
     case 6: P.flash_missing = v != 0.0f; break;
     case 7: P.gateway_online = v != 0.0f; break;
+    case 8: if (v >= 0.0f && v < SV_COUNT) { s_sv_hung[(int)v] = true; } break;   /* hang task #v */
     default: break;
     }
 }
@@ -1000,6 +1088,8 @@ EXPORT(sim_get) float sim_get(int id)
                                            : s_log.total_slots - s_log.tail + s_log.unsent));
     case 17: return s_oled_on && D.oled_ok ? 1.0f : 0.0f;
     case 18: return D.cfg.modbus_addr;
+    case 19: return (float)s_wdt_resets;
+    case 20: return s_sv_late >= 0 ? 1.0f : 0.0f;   /* supervisor stopped feeding IWDG */
     default: return 0.0f;
     }
 }
