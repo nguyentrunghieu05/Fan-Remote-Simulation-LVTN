@@ -8,7 +8,8 @@ cd "$(dirname "$0")/../.."
 SRC="tools/simulator/sim_board.c src/app/app_fsm.c src/app/fan_logic.c src/middleware/pid.c \
      src/middleware/ramp.c src/middleware/fault.c src/middleware/modbus_slave.c src/middleware/crc.c \
      src/middleware/telemetry.c src/middleware/datalog.c src/middleware/cli.c \
-     src/drivers/w25qxx.c src/drivers/sht3x.c src/drivers/ssd1306.c"
+     src/drivers/w25qxx.c src/drivers/sht3x.c src/drivers/ssd1306.c \
+     src/drivers/bme280.c src/drivers/lcd1602.c src/drivers/mcp2515.c"
 INC="-Isrc/common -Isrc/app -Isrc/middleware -Isrc/drivers"
 OUT=tools/simulator/build
 mkdir -p $OUT
