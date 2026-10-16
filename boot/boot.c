@@ -9,7 +9,8 @@
  *   2. let fw_boot_decide() choose: run, install NEW, or roll back to BACKUP;
  *   3. install = copy the running application to BACKUP, then NEW into the
  *      internal flash, then check the CRC of what was programmed;
- *   4. save the new state only after the copy succeeded, then jump.
+ *   4. save the new state only after the copy succeeded;
+ *   5. start the IWDG (BOOT_IWDG_MS) and jump.
  * A power cut at any point leaves the NEW slot untouched and the state as it
  * was, so the same step is simply done again at the next reset.
  *
@@ -31,6 +32,7 @@
 #define RAM_START      0x20000000UL
 #define RAM_END        (RAM_START + 144UL * 1024UL)
 #define PAGE           FLASH_PAGE_SIZE           /* 2 KB */
+#define BOOT_IWDG_MS   8000U                     /* until the application sets its own */
 
 static UART_HandleTypeDef s_uart;
 static SPI_HandleTypeDef  s_spi;
@@ -237,9 +239,24 @@ static int backup_app(uint32_t version)
 }
 
 /* ------------------------------------------------------------ jump */
+/* An application that hangs before it starts its own watchdog still gets
+ * reset, so an unconfirmed one counts as a failed trial. The application
+ * then sets its own timeout (bsp_iwdg_init); the IWDG cannot be stopped. */
+static void iwdg_start(void)
+{
+    IWDG->KR  = 0xCCCCU;                            /* start, turns the LSI on */
+    IWDG->KR  = 0x5555U;                            /* unlock PR and RLR */
+    IWDG->PR  = IWDG_PRESCALER_256;                 /* 32 kHz / 256: 8 ms per count */
+    IWDG->RLR = BOOT_IWDG_MS / 8U;
+    uint32_t t0 = HAL_GetTick();
+    while (IWDG->SR != 0U && (HAL_GetTick() - t0) < 100U) { }
+    IWDG->KR  = 0xAAAAU;                            /* reload */
+}
+
 static void jump_to_app(void)
 {
     const uint32_t *v = (const uint32_t *)APP_FLASH_BASE;
+    iwdg_start();
     HAL_UART_DeInit(&s_uart);
     HAL_SPI_DeInit(&s_spi);
     SysTick->CTRL = 0U;
