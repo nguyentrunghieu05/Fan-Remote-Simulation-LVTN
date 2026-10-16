@@ -459,6 +459,7 @@ static int fw_receive(cli_t *c, uint32_t size, uint32_t crc, uint32_t version)
         }
         uint16_t len = (uint16_t)(pkt[0] | (pkt[1] << 8));
         if (len == 0U) {
+            (void)fw_rx(&pkt[2], 2U, 2000U);           /* its CRC, so it does not reach the CLI */
             break;                                     /* end of image */
         }
         if (len > FW_PKT_MAX) {

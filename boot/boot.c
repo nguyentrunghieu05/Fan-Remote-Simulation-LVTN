@@ -289,11 +289,23 @@ int main(void)
     int rc = ERR_OK;
     if (act == FW_ACT_INSTALL) {
         say("[BOOT] install %s (running %s)", ver(hn.version, a), ver(st.prev_version, b));
-        if (app_ok) {
+        /* tries != 0 while PENDING: the backup was taken and a reset hit the
+         * programming, so the internal flash is half written; keep the backup */
+        bool backed_up = before.state == FW_STATE_PENDING && before.tries != 0U;
+        if (backed_up) {
+            say("[BOOT] install was interrupted, backup kept");
+            if (!backup_ok) {
+                st.prev_version = 0U;
+            }
+        } else if (app_ok) {
             rc = backup_app(st.prev_version);
             say("[BOOT] backup to W25Q64: %s", rc == ERR_OK ? "ok" : "failed");
             if (rc != ERR_OK) {
                 st.prev_version = 0U;               /* no rollback possible for this one */
+            } else {
+                fw_boot_t mark = before;            /* remember it before touching the flash */
+                mark.tries = 1U;
+                (void)config_store_save(&cs, &mark, sizeof mark);
             }
         }
         uint32_t t0 = HAL_GetTick();

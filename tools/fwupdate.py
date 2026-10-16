@@ -70,6 +70,7 @@ def main():
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--no-install", action="store_true", help="only store the image, do not install")
     a = ap.parse_args()
+    sys.stdout.reconfigure(errors="replace")   # Windows consoles cannot print every byte
 
     data = open(a.image, "rb").read()
     if not a.version:
