@@ -136,6 +136,25 @@ Trên Windows, nếu gcc không nằm trong PATH:
 Kết quả build hiện tại: 64 KB flash (12 %), 41 KB RAM (28 %, trong đó 32 KB
 là heap FreeRTOS), không có cảnh báo với `-Wall -Wextra`.
 
+### Bootloader và cập nhật firmware qua console
+
+Flash trong được chia: bootloader ở 32 KB đầu (0x08000000), ứng dụng từ
+0x08008000. Ảnh mới được gửi qua cổng console vào khe NEW trên W25Q64;
+bootloader chép bản đang chạy sang khe BACKUP, cài ảnh mới, kiểm CRC-32.
+Ảnh mới phải tự xác nhận (sau 30 s chạy); nếu bị reset 3 lần mà chưa xác
+nhận, bootloader chép BACKUP về (rollback).
+
+```bash
+make boot                 # -> build_boot/boot.hex (32 KB đầu)
+make flash-boot           # nạp bootloader (một lần)
+make BOOT=1               # ứng dụng đặt ở 0x08008000 -> build_app/
+make BOOT=1 flash         # nạp ứng dụng lần đầu qua ST-LINK
+python tools/fwupdate.py COM5            # các lần sau: cập nhật qua console
+```
+
+Lệnh trên console: `fw` (trạng thái và hai khe), `fw install`, `fw confirm`.
+Bản build mặc định (`make`, không có bootloader) vẫn nạp và chạy như cũ.
+
 ### Mở bằng STM32CubeIDE
 
 Thư mục này đã là một project STM32CubeIDE (`.project`, `.cproject`), dùng
@@ -213,9 +232,12 @@ sóng thì dữ liệu nằm chờ trong flash, có sóng lại thì gửi bù.
 | Vùng | Địa chỉ | Nội dung |
 |---|---|---|
 | Cấu hình A / B | 0x000000 / 0x001000 | 2 bản sao, CRC-32, luân phiên: mất điện giữa chừng vẫn còn bản cũ |
-| Log đo đạc | 0x010000 → hết chip | vòng tròn, bản ghi 32 byte có số thứ tự + CRC-16 |
+| Trạng thái cập nhật A / B | 0x002000 / 0x003000 | IDLE / PENDING / TRIAL, số lần thử, phiên bản |
+| Log đo đạc | 0x010000 → 0x700000 | vòng tròn, bản ghi 32 byte có số thứ tự + CRC-16 |
+| Khe firmware NEW | 0x700000 (512 KB) | ảnh mới nhận qua console, chờ bootloader cài |
+| Khe firmware BACKUP | 0x780000 (512 KB) | bản đang chạy trước khi cập nhật, để quay về |
 
-Với W25Q64 và chu kỳ log 10 s: khoảng 260.000 bản ghi, tức khoảng 30 ngày.
+Với W25Q64 và chu kỳ log 10 s: khoảng 227.000 bản ghi, tức khoảng 26 ngày.
 Cờ "đã gửi" được ghi bằng cách lập trình byte 0xFF thành 0x00 (NOR flash
 cho phép xoá bit 1 → 0 không cần xoá sector).
 
