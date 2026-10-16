@@ -147,8 +147,22 @@
 /* ---- Storage layout on the external flash ---- */
 #define STORAGE_CFG_A_ADDR      0x000000UL       /* sector 0: config copy A */
 #define STORAGE_CFG_B_ADDR      0x001000UL       /* sector 1: config copy B */
+#define FW_STATE_A_ADDR         0x002000UL       /* sector 2: update state copy A */
+#define FW_STATE_B_ADDR         0x003000UL       /* sector 3: update state copy B */
 #define STORAGE_LOG_ADDR        0x010000UL       /* data log from 64 KB ... */
-#define STORAGE_LOG_SECTORS_MAX 2032U            /* ... to the end of 8 MB  */
+#define STORAGE_LOG_SECTORS_MAX 1776U            /* ... to 7 MB (0x700000)  */
+#define FW_SLOT_NEW             0x700000UL       /* image received, waiting to install */
+#define FW_SLOT_BACKUP          0x780000UL       /* previous image, for rollback      */
+#define FW_SLOT_SIZE            0x080000UL       /* 512 KB each, header included      */
+
+/* ---- Bootloader and application in the internal flash ----
+ * The bootloader owns the first 32 KB; the application starts right after
+ * (linker/app.ld, make BOOT=1). Updates are limited to bank 1 (256 KB). */
+#define BOOT_FLASH_BASE         0x08000000UL
+#define APP_FLASH_BASE          0x08008000UL
+#define APP_FLASH_END           0x08040000UL     /* end of bank 1 */
+#define APP_MAX_SIZE            (APP_FLASH_END - APP_FLASH_BASE)
+#define FW_MAX_TRIES            3U               /* unconfirmed boots before rollback */
 
 /* ---- Interrupt priorities (Cortex-M0+: 0 = highest .. 3 = lowest) ----
  * Every ISR that calls a FreeRTOS "FromISR" API must have a priority
