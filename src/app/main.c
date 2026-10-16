@@ -32,7 +32,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define FW_VERSION  "1.0.0"
+#define APP_VERSION "1.0.0"
 
 static void start(TaskFunction_t fn, const char *name, uint16_t stack_words, UBaseType_t prio)
 {
@@ -57,7 +57,7 @@ static void init_task(void *arg)
     /* 1. console first, so every following step can report */
     console_init();
     log_printf("SYS", "fan controller v%s, %lu MHz, reset: %s",
-               FW_VERSION, (unsigned long)(SystemCoreClock / 1000000U), bsp_reset_cause());
+               APP_VERSION, (unsigned long)(SystemCoreClock / 1000000U), bsp_reset_cause());
 
     /* 2. settings: from SPI flash if present, defaults otherwise */
     fan_config_t cfg;
