@@ -2,6 +2,7 @@
 # Fan controller firmware - STM32G0B1RE (NUCLEO-G0B1RE)
 #
 #   make            build build/fan_controller.{elf,hex,bin}
+#   make BOOT=1     same, linked at 0x08008000 to run behind the bootloader
 #   make flash      program the board (STM32CubeProgrammer CLI over ST-LINK)
 #   make test       build and run the unit tests on the PC
 #   make clean
@@ -59,8 +60,18 @@ CFLAGS  = $(MCU) $(DEFS) $(INCLUDES) $(OPT) -std=gnu11 -Wall -Wextra \
 CFLAGS_3P = $(filter-out -Wextra,$(CFLAGS)) -Wno-unused-parameter
 ASFLAGS = $(MCU) $(DEFS) -g3
 
+# BOOT=1: the application starts at 0x08008000, behind the bootloader, and
+# SystemInit moves the vector table there. Use a separate build directory
+# so the two layouts never share object files.
+BOOT ?= 0
+ifeq ($(BOOT),1)
+LDSCRIPT = linker/app.ld
+DEFS    += -DUSER_VECT_TAB_ADDRESS -DVECT_TAB_OFFSET=0x00008000U
+BUILD    = build_app
+else
 LDSCRIPT = linker/STM32G0B1RETX_FLASH.ld
-LDFLAGS  = $(MCU) -T$(LDSCRIPT) --specs=nano.specs --specs=nosys.specs \
+endif
+LDFLAGS  = $(MCU) -T$(LDSCRIPT) -Llinker --specs=nano.specs --specs=nosys.specs \
            -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map,--cref \
            -Wl,--print-memory-usage -Wl,--no-warn-rwx-segments
 
@@ -85,7 +96,7 @@ $(BUILD)/%.o: %.s
 	@echo "AS  $<"
 	@$(AS) -c $(ASFLAGS) $< -o $@
 
-$(BUILD)/$(TARGET).elf: $(OBJS) $(LDSCRIPT)
+$(BUILD)/$(TARGET).elf: $(OBJS) $(LDSCRIPT) linker/sections.ld
 	@echo "LD  $@"
 	@$(CC) $(OBJS) $(LDFLAGS) -o $@
 
@@ -102,7 +113,7 @@ test:
 	$(MAKE) -C tests
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build build_app
 	$(MAKE) -C tests clean
 
 -include $(OBJS:.o=.d)
