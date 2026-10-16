@@ -16,6 +16,7 @@ void suite_i2c_devices(void);
 void suite_mcp2515(void);
 void suite_telemetry(void);
 void suite_app(void);
+void suite_fw_image(void);
 
 int main(void)
 {
@@ -34,6 +35,7 @@ int main(void)
     suite_mcp2515();
     suite_telemetry();
     suite_app();
+    suite_fw_image();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
