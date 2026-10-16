@@ -13,6 +13,8 @@
 #include "can_link.h"
 #include "power.h"
 #include "supervisor.h"
+#include "crc.h"
+#include "fw_image.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <stdlib.h>
@@ -388,6 +390,179 @@ static int cmd_reboot(cli_t *c, int argc, char *argv[])
     return 0;
 }
 
+/* ---------------------------------------------------------------- fw
+ * fw recv <size> <crc32 hex> <a.b.c> switches this port to a binary,
+ * stop-and-wait transfer (tools/fwupdate.py):
+ *   host:   [len lo][len hi][len data bytes][CRC-16/MODBUS lo][hi]   len <= 256
+ *   device: 0x06 ACK (stored) | 0x15 NAK (bad CRC, send again) | 0x18 CAN (abort)
+ * A packet with len = 0 ends the transfer. The first 0x06 means "ready".
+ * Log lines from other tasks may appear in between; they never contain
+ * these control bytes, so the host just skips them. */
+#define FW_PKT_MAX  256U
+#define FW_ACK      0x06U
+#define FW_NAK      0x15U
+#define FW_CAN      0x18U
+
+static void fw_put(uint8_t b) { (void)bsp_uart_write(BSP_UART_CONSOLE, &b, 1U); }
+
+static bool fw_rx(uint8_t *buf, size_t n, uint32_t timeout_ms)
+{
+    TickType_t t0 = xTaskGetTickCount();
+    size_t got = 0U;
+    while (got < n) {
+        got += bsp_uart_read(BSP_UART_CONSOLE, &buf[got], n - got);
+        if (got < n) {
+            if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(timeout_ms)) {
+                return false;
+            }
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+            sv_kick(s_sv);
+        }
+    }
+    return true;
+}
+
+static bool parse_version(const char *s, uint32_t *v)
+{
+    unsigned long a, b, d;
+    if (sscanf(s, "%lu.%lu.%lu", &a, &b, &d) != 3 || a > 255U || b > 255U || d > 255U) {
+        return false;
+    }
+    *v = FW_VERSION(a, b, d);
+    return true;
+}
+
+static const char *fmt_version(char *b, uint32_t v)
+{
+    snprintf(b, 16, "%lu.%lu.%lu", (unsigned long)(v >> 16), (unsigned long)((v >> 8) & 0xFFU),
+             (unsigned long)(v & 0xFFU));
+    return b;
+}
+
+static int fw_receive(cli_t *c, uint32_t size, uint32_t crc, uint32_t version)
+{
+    int rc = storage_fw_begin();                       /* NEW slot is empty from here on */
+    if (rc != ERR_OK) {
+        cli_printf(c, "fw: no SPI flash (rc=%d)\r\n", rc);
+        return 1;
+    }
+    static uint8_t pkt[2U + FW_PKT_MAX + 2U];
+    uint32_t total = 0U, naks = 0U;
+    TickType_t t0 = xTaskGetTickCount();
+    bsp_uart_flush_rx(BSP_UART_CONSOLE);
+    fw_put(FW_ACK);                                    /* ready */
+    for (;;) {
+        sv_kick(s_sv);
+        if (!fw_rx(pkt, 2U, 5000U)) {
+            rc = ERR_TIMEOUT;
+            break;
+        }
+        uint16_t len = (uint16_t)(pkt[0] | (pkt[1] << 8));
+        if (len == 0U) {
+            break;                                     /* end of image */
+        }
+        if (len > FW_PKT_MAX) {
+            rc = ERR_PARAM;
+            break;
+        }
+        if (!fw_rx(&pkt[2], len + 2U, 2000U)) {
+            rc = ERR_TIMEOUT;
+            break;
+        }
+        uint16_t got = (uint16_t)(pkt[2U + len] | (pkt[3U + len] << 8));
+        if (crc16_modbus(pkt, 2U + len) != got) {
+            naks++;
+            bsp_uart_flush_rx(BSP_UART_CONSOLE);
+            fw_put(FW_NAK);
+            continue;
+        }
+        rc = storage_fw_put(&pkt[2], len);
+        if (rc != ERR_OK) {
+            break;
+        }
+        total += len;
+        fw_put(FW_ACK);
+    }
+    if (rc == ERR_OK && total != size) {
+        rc = ERR_PARAM;
+    }
+    if (rc == ERR_OK) {
+        rc = storage_fw_finish(version, crc);          /* whole-image CRC, then header */
+    }
+    uint32_t ms = (uint32_t)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS);
+    char v[16];
+    if (rc != ERR_OK) {
+        fw_put(FW_CAN);
+        cli_printf(c, "\r\nfw: transfer failed rc=%d after %lu bytes\r\n", rc, (unsigned long)total);
+        return 1;
+    }
+    fw_put(FW_ACK);
+    cli_printf(c, "\r\nfw: %lu bytes in %lu ms (%lu resent), CRC-32 ok, version %s stored in NEW slot\r\n"
+                  "fw: type 'fw install' to install it\r\n",
+               (unsigned long)total, (unsigned long)ms, (unsigned long)naks, fmt_version(v, version));
+    return 0;
+}
+
+static void fw_slot_line(cli_t *c, const char *name, uint32_t slot)
+{
+    fw_header_t h;
+    char v[16];
+    int rc = storage_fw_slot(slot, &h);
+    if (rc == ERR_OK) {
+        cli_printf(c, "slot %-6s v%s  %lu bytes  crc %08lX  ok\r\n", name, fmt_version(v, h.version),
+                   (unsigned long)h.size, (unsigned long)h.crc);
+    } else {
+        cli_printf(c, "slot %-6s %s\r\n", name, rc == ERR_NOT_FOUND ? "empty" : "invalid");
+    }
+}
+
+static int cmd_fw(cli_t *c, int argc, char *argv[])
+{
+    static const char *const st_name[] = { "IDLE", "PENDING", "TRIAL" };
+    char a[16], b[16];
+    if (argc == 5 && strcmp(argv[1], "recv") == 0) {
+        uint32_t size = (uint32_t)strtoul(argv[2], NULL, 10);
+        uint32_t crc  = (uint32_t)strtoul(argv[3], NULL, 16);
+        uint32_t ver;
+        if (size == 0U || size > APP_MAX_SIZE || !parse_version(argv[4], &ver)) {
+            cli_printf(c, "usage: fw recv <size> <crc32 hex> <a.b.c>\r\n");
+            return 1;
+        }
+        return fw_receive(c, size, crc, ver);
+    }
+    if (argc == 2 && strcmp(argv[1], "install") == 0) {
+        int rc = storage_fw_request_install();
+        if (rc != ERR_OK) {
+            cli_printf(c, "fw: nothing valid to install (rc=%d)\r\n", rc);
+            return 1;
+        }
+        cli_printf(c, "fw: install requested, rebooting into the bootloader...\r\n");
+        vTaskDelay(pdMS_TO_TICKS(50));
+        bsp_reset();
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "confirm") == 0) {
+        int rc = storage_fw_confirm();
+        cli_printf(c, "fw: %s\r\n", rc == ERR_OK ? "confirmed" : "nothing to confirm");
+        return 0;
+    }
+    if (argc != 1 && !(argc == 2 && strcmp(argv[1], "info") == 0)) {
+        cli_printf(c, "usage: fw [info] | recv <size> <crc> <a.b.c> | install | confirm\r\n");
+        return 1;
+    }
+    fw_boot_t st;
+    if (storage_fw_state(&st) != ERR_OK) {
+        cli_printf(c, "fw: no SPI flash\r\n");
+        return 1;
+    }
+    cli_printf(c, "state  %s  tries %lu  version %s  previous %s\r\n",
+               st.state < 3U ? st_name[st.state] : "?", (unsigned long)st.tries,
+               fmt_version(a, st.version), fmt_version(b, st.prev_version));
+    fw_slot_line(c, "NEW", FW_SLOT_NEW);
+    fw_slot_line(c, "BACKUP", FW_SLOT_BACKUP);
+    return 0;
+}
+
 static const cli_cmd_t s_cmds[] = {
     { "status",   "show measurements and state",            cmd_status },
     { "mode",     "off | manual | auto",                    cmd_mode },
@@ -404,6 +579,7 @@ static const cli_cmd_t s_cmds[] = {
     { "tasks",    "RTOS tasks, stack and CPU usage",        cmd_tasks },
     { "stats",    "Modbus / LoRa / CAN counters",           cmd_stats },
     { "wdt",      "watchdog status | test | clear",         cmd_wdt },
+    { "fw",       "update: info | recv | install | confirm", cmd_fw },
     { "reboot",   "software reset",                         cmd_reboot },
 };
 
