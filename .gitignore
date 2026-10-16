@@ -1,5 +1,6 @@
 build/
 build_app/
+build_boot/
 tests/unit_tests
 tests/renode/*.log
 tests/renode/logs/

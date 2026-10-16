@@ -109,13 +109,63 @@ $(BUILD)/%.bin: $(BUILD)/%.elf
 flash: all
 	STM32_Programmer_CLI -c port=SWD -w $(BUILD)/$(TARGET).hex -v -rst
 
+# ---------------------------------------------------------------- bootloader
+# make boot / make flash-boot: the bootloader in the first 32 KB. It reuses
+# the portable code (fw_image, CRC, config_store, W25Q64 driver) and a few
+# HAL modules, no RTOS. The application must then be built with BOOT=1.
+BOOT_BUILD = build_boot
+BOOT_HAL   = $(addprefix $(HAL_DIR)/Src/stm32g0xx_hal,.c _cortex.c _rcc.c _rcc_ex.c _gpio.c _dma.c \
+             _spi.c _uart.c _uart_ex.c _flash.c _flash_ex.c _pwr_ex.c)
+BOOT_C_SRC = boot/boot.c src/middleware/fw_image.c src/middleware/crc.c \
+             src/middleware/config_store.c src/drivers/w25qxx.c \
+             startup/system_stm32g0xx.c $(BOOT_HAL)
+BOOT_OBJS  = $(addprefix $(BOOT_BUILD)/,$(BOOT_C_SRC:.c=.o)) $(addprefix $(BOOT_BUILD)/,$(ASM_SRC:.s=.o))
+
+boot: $(BOOT_BUILD)/boot.elf $(BOOT_BUILD)/boot.hex $(BOOT_BUILD)/boot.bin
+	@$(SIZE) $<
+
+$(BOOT_BUILD)/boot/%.o: boot/%.c
+	@mkdir -p $(dir $@)
+	@echo "CC  $<"
+	@$(CC) -c $(CFLAGS) $< -o $@
+
+$(BOOT_BUILD)/src/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	@echo "CC  $<"
+	@$(CC) -c $(CFLAGS) $< -o $@
+
+$(BOOT_BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC  $<"
+	@$(CC) -c $(CFLAGS_3P) $< -o $@
+
+$(BOOT_BUILD)/%.o: %.s
+	@mkdir -p $(dir $@)
+	@echo "AS  $<"
+	@$(AS) -c $(ASFLAGS) $< -o $@
+
+$(BOOT_BUILD)/boot.elf: $(BOOT_OBJS) linker/boot.ld linker/sections.ld
+	@echo "LD  $@"
+	@$(CC) $(BOOT_OBJS) $(MCU) -Tlinker/boot.ld -Llinker --specs=nano.specs --specs=nosys.specs \
+	   -Wl,--gc-sections -Wl,-Map=$(BOOT_BUILD)/boot.map -Wl,--print-memory-usage \
+	   -Wl,--no-warn-rwx-segments -o $@
+
+$(BOOT_BUILD)/boot.hex: $(BOOT_BUILD)/boot.elf
+	@$(OBJCOPY) -O ihex $< $@
+
+$(BOOT_BUILD)/boot.bin: $(BOOT_BUILD)/boot.elf
+	@$(OBJCOPY) -O binary -S $< $@
+
+flash-boot: boot
+	STM32_Programmer_CLI -c port=SWD -w $(BOOT_BUILD)/boot.hex -v -rst
+
 test:
 	$(MAKE) -C tests
 
 clean:
-	rm -rf build build_app
+	rm -rf build build_app build_boot
 	$(MAKE) -C tests clean
 
 -include $(OBJS:.o=.d)
 
-.PHONY: all flash test clean
+.PHONY: all flash test clean boot flash-boot
